@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seartch",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "limits": { "cpu_ms": 30000 },
+  // Workers AI, only for toMarkdown() of PDFs and office documents. Image
+  // conversion (the only part that runs billable models) is disabled in fetch.ts.
+  "ai": { "binding": "AI" }
+  // No Browser Run binding: pages that need a real browser are returned as-is.
+  // Secrets (wrangler secret put ...): AUTH_TOKEN (required)
+}

@@ -1,0 +1,35 @@
+{
+  "name": "seartch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.4.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@mozilla/readability": "^0.6.0",
+    "agents": "^0.27.0",
+    "linkedom": "^0.18.13",
+    "node-html-markdown": "^2.0.0",
+    "node-html-parser": "^7.0.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.3.7",
+    "@cloudflare/workers-types": "^5.20261008.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.148.0"
+  },
+  "description": "Self-hosted metasearch (a SearXNG port) + web-page-to-Markdown fetcher + MCP server, running on a single Cloudflare Worker",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vaib215/seartch.git"
+  }
+}
