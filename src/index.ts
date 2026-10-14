@@ -18,6 +18,8 @@ export interface Env {
   TICKER_SEARCH?: Fetcher;
   /** ...or its base URL. Either one enables company resolution and exchange filings. */
   TICKER_SEARCH_URL?: string;
+  /** Deployment version (version_metadata binding); keys caches so a deploy starts fresh. */
+  CF_VERSION_METADATA?: { id: string };
 }
 
 const MAX_QUERIES = 5;
@@ -95,6 +97,7 @@ async function handleSearch(body: Record<string, unknown>, env: Env) {
         health: state,
         recordOutcomes: (o) => health.record(o),
         cache: caches.default,
+        cacheVersion: env.CF_VERSION_METADATA?.id,
         publishedDate: (url) => fetchPublishedDate(url),
         resolveCompanies: tickerSearchConfigured() ? resolveCompanies : undefined,
       },

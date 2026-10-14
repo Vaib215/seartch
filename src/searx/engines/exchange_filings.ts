@@ -430,7 +430,11 @@ export const exchangeFilings: Engine = {
     if (!filings.length && errors.length) throw errors[0];
     const ranked = rankFilings(filings, params.query).slice(0, MAX_RESULTS + ENRICH_LIMIT);
     await enrichFromPdfs(ranked.slice(0, MAX_RESULTS + ENRICH_LIMIT));
+    let kept = ranked.filter((f) => !isEmptyFiling(f));
+    // A topic question ("Infosys deal wins") wants filings about that topic only.
+    const topics = topicTerms(params.query, companies.flatMap((c) => c.aliases));
+    if (topics.length) kept = kept.filter((f) => termHits(`${f.category} ${f.text}`, topics) > 0);
     // Re-rank: the subject line may now match the question ("dividend", "acquisition").
-    return rankFilings(ranked.filter((f) => !isEmptyFiling(f)), params.query).slice(0, MAX_RESULTS).map(toResult);
+    return rankFilings(kept, params.query).slice(0, MAX_RESULTS).map(toResult);
   },
 };

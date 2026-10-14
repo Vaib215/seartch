@@ -8,6 +8,8 @@
   "limits": { "cpu_ms": 30000 },
   // Workers AI, only for toMarkdown() of PDFs and office documents. Image
   // conversion (the only part that runs billable models) is disabled in fetch.ts.
+  // Deployment id, used to key caches so each deploy serves fresh results.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "ai": { "binding": "AI" }
   // No Browser Run binding: pages that need a real browser are returned as-is.
   // Secrets (wrangler secret put ...): AUTH_TOKEN (required)

@@ -24,6 +24,7 @@ interface SearchOut {
   unresponsiveEngines: { engine: string; error: string; suspended: boolean }[];
   dropped?: { nonArticle: number; spam: number; offTopic: number; outOfRange: number };
   companies?: string[];
+  topic?: { terms: string[]; matched: number };
 }
 
 const DEFAULT_SEARCH_CONTENT_CHARS = 4000;
@@ -105,6 +106,9 @@ async function run(fn: () => Promise<string>) {
 function formatSearch(r: SearchOut, maxChars: number): string {
   const lines = [`## Results for "${r.query}"`];
   if (r.companies?.length) lines.push(`_Company: ${r.companies.join(", ")}_`);
+  if (r.topic && r.topic.matched === 0 && r.results.length) {
+    lines.push(`_No result matches the topic "${r.topic.terms.join(" ")}"; these are other recent stories about the company._`);
+  }
   if (!r.results.length) lines.push("No results.");
   r.results.forEach((h, i) => {
     lines.push(`${i + 1}. [${h.title}](${h.url})`);

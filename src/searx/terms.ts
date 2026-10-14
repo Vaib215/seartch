@@ -121,10 +121,34 @@ export function namesCompany(text: string, terms: QueryTerms, aliases: string[])
   return nameWords.length > 0 && nameWords.every((w) => containsTerm(hay, w));
 }
 
-/** How many of the given terms appear in the text. */
+// How news and filings phrase common research topics.
+const TOPIC_SYNONYMS: Record<string, string[]> = {
+  deal: ["deal", "deals", "contract", "contracts", "order", "orders", "agreement", "pact", "partnership", "mandate", "engagement", "tcv"],
+  win: ["win", "wins", "won", "winning", "bag", "bags", "bagged", "secure", "secures", "secured", "sign", "signs", "signed", "award", "awarded", "clinch", "clinches", "clinched", "selected"],
+  order: ["order", "orders", "contract", "contracts", "deal", "deals", "award", "awarded", "work order"],
+  acquisition: ["acquisition", "acquire", "acquires", "acquired", "buyout", "takeover", "stake"],
+  merger: ["merger", "merge", "merges", "amalgamation", "demerger"],
+  layoff: ["layoff", "layoffs", "job cuts", "retrenchment", "fired"],
+  hiring: ["hiring", "hire", "hires", "headcount", "recruit", "recruitment", "job offers"],
+  ceo: ["ceo", "chief executive", "managing director", "md and ceo", "md & ceo"],
+  fraud: ["fraud", "probe", "investigation", "raid", "scam", "irregularities"],
+  buyback: ["buyback", "buy-back", "share repurchase"],
+  ipo: ["ipo", "public issue", "listing", "drhp", "rhp", "anchor"],
+  expansion: ["expansion", "expand", "expands", "capex", "capacity", "new plant"],
+  stake: ["stake", "stake sale", "shareholding", "block deal", "bulk deal", "promoter"],
+  guidance: ["guidance", "outlook", "forecast"],
+};
+
+/** The phrasings a topic word may take: "wins" → win, won, bags, secures, signs... */
+export function topicVariants(term: string): string[] {
+  const stem = term.replace(/(?<=[a-z]{3})(?:es|s)$/, "");
+  return TOPIC_SYNONYMS[term] ?? TOPIC_SYNONYMS[stem] ?? [...new Set([term, stem, `${stem}s`])];
+}
+
+/** How many of the given topic terms appear in the text, in any of their phrasings. */
 export function termHits(text: string, terms: string[]): number {
   const hay = normalizeText(text);
-  return terms.filter((t) => containsTerm(hay, t)).length;
+  return terms.filter((t) => topicVariants(t).some((v) => containsTerm(hay, v))).length;
 }
 
 /** How many jargon phrasings appear, for ranking. */

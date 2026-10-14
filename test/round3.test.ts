@@ -201,3 +201,58 @@ describe("PDF metadata", () => {
     expect(pdfPageStats(stripDocumentMetadata(md))).toEqual({ pages: 1, scannedPages: 0 });
   });
 });
+
+describe("topic strictness", () => {
+  it("matches topic words in their usual phrasings", async () => {
+    const { termHits, topicVariants } = await import("../src/searx/terms");
+    expect(topicVariants("wins")).toEqual(expect.arrayContaining(["bags", "secures", "signs"]));
+    expect(termHits("Infosys bags multi-year contract from Danish retailer", ["deal", "wins"])).toBe(2);
+    expect(termHits("Infosys Foundation enables 2.5 lakh job offers", ["deal", "wins"])).toBe(0);
+  });
+
+  it("drops off-topic stories once enough on-topic ones exist", () => {
+    const r = (slug: string, title: string): MergedResult => ({ url: `https://n.example/${slug}`, title, engines: ["x"], positions: [1], score: 1 });
+    const dropped = { nonArticle: 0, spam: 0, offTopic: 0 };
+    const kept = refineNews(
+      [
+        r("a", "Infosys bags $1.5 billion deal from European bank"),
+        r("b", "Infosys signs multi-year contract with Danish retailer"),
+        r("c", "Infosys wins TCV of $3 billion in Q2"),
+        r("d", "Infosys Foundation enables 2.5 lakh job offers"),
+      ],
+      "Infosys deal wins",
+      [INFY],
+      dropped,
+    );
+    expect(kept.map((x) => x.url.slice(-1))).toEqual(["a", "b", "c"]);
+    expect(dropped.offTopic).toBe(1);
+  });
+
+  it("keeps off-topic stories (ranked lower) when on-topic ones are scarce", () => {
+    const r = (slug: string, title: string): MergedResult => ({ url: `https://n.example/${slug}`, title, engines: ["x"], positions: [1], score: 1 });
+    const dropped = { nonArticle: 0, spam: 0, offTopic: 0 };
+    const kept = refineNews([r("a", "Infosys bags deal"), r("d", "Infosys Foundation news")], "Infosys deal wins", [INFY], dropped);
+    expect(kept).toHaveLength(2);
+    expect(kept.find((x) => x.url.endsWith("d"))!.score).toBeLessThan(1);
+  });
+});
+
+describe("topic strictness counts only stories about the company", () => {
+  it("doesn't let other companies' on-topic stories trigger dropping", () => {
+    const r = (slug: string, title: string): MergedResult => ({ url: `https://n.example/${slug}`, title, engines: ["x"], positions: [1], score: 1 });
+    const dropped = { nonArticle: 0, spam: 0, offTopic: 0 };
+    const kept = refineNews(
+      [
+        r("h1", "HCLTech wins deal"),
+        r("h2", "Wipro bags contract"),
+        r("h3", "TCS signs agreement"),
+        r("i1", "Infosys bags deal from bank"),
+        r("i2", "Infosys Foundation enables job offers"),
+      ],
+      "Infosys deal wins",
+      [INFY],
+      dropped,
+    );
+    expect(kept.map((x) => x.url.slice(-2))).toEqual(["i1", "i2"]);
+  });
+});

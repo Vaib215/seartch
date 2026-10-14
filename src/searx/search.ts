@@ -35,8 +35,10 @@ const TIME_RANGE_MS: Record<TimeRange, number> = {
 // Publishers and engines disagree by hours on "today"; don't cut exactly at the edge.
 const RANGE_SLACK_MS = DAY_MS;
 const PASSING_MENTION_WEIGHT = 0.4;
-// "Infosys deal wins": stories about Infosys but not about deals rank below those that are.
+// "Infosys deal wins": stories about Infosys but not about deals rank below those
+// that are, and are dropped altogether once enough on-topic stories exist.
 const TOPIC_MISS_WEIGHT = 0.35;
+const TOPIC_DROP_MIN_MATCHES = 3;
 // News mode reads page metadata to date this many top undated results.
 const DATE_CHECKS = 6;
 const DATE_CHECK_CONCURRENCY = 4;
@@ -76,6 +78,8 @@ export interface SearchResponse {
   dropped?: { nonArticle: number; spam: number; offTopic: number; outOfRange: number };
   /** News mode: companies the query was resolved to. */
   companies?: string[];
+  /** News mode with a company and topic ("Infosys deal wins"): the topic words and how many results match them. */
+  topic?: { terms: string[]; matched: number };
 }
 
 export interface SearchDeps {
@@ -84,6 +88,8 @@ export interface SearchDeps {
   /** Persists outcomes (fire-and-forget). */
   recordOutcomes(outcomes: Outcome[]): void;
   cache?: Cache;
+  /** Distinguishes cache entries per deployment (the Worker version id). */
+  cacheVersion?: string;
   /** Resolves company names/tickers in a query; enables company-aware relevance in news mode. */
   resolveCompanies?(query: string): Promise<Company[]>;
   /** Reads an article's publish date from its page; used in news mode for undated results. */
@@ -156,7 +162,7 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
     runnable.map(async (engine) => {
       const started = Date.now();
       try {
-        const { results, cached, skipped } = await runEngine(engine, params, deps.cache);
+        const { results, cached, skipped } = await runEngine(engine, params, deps.cache, deps.cacheVersion);
         if (skipped) return;
         container.extend(engine, results);
         timings.push({ engine: engine.name, ms: Date.now() - started, results: results.length, cached });
@@ -184,6 +190,11 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
     results = withinTimeRange(results, params.timeRange);
     dropped.outOfRange = before - results.length;
     response.dropped = dropped;
+    const topics = companies.length ? topicTerms(params.query, companies.flatMap((c) => c.aliases)) : [];
+    if (topics.length) {
+      const matched = results.filter((r) => termHits(`${r.title} ${r.content ?? ""} ${r.url.replace(/[-_/.]+/g, " ")}`, topics) > 0).length;
+      response.topic = { terms: topics, matched };
+    }
     if (companies.length) {
       response.companies = companies.map((c) => {
         const ids = [c.nse && `NSE: ${c.nse}`, c.bse && `BSE: ${c.bse}`].filter(Boolean).join(", ");
@@ -212,6 +223,12 @@ export function refineNews(
 ): MergedResult[] {
   const terms = splitQuery(query);
   const topics = companies.length ? topicTerms(query, companies.flatMap((c) => c.aliases)) : [];
+  const onTopic = (r: MergedResult) => termHits(`${r.title} ${r.content ?? ""} ${r.url.replace(/[-_/.]+/g, " ")}`, topics) > 0;
+  // Count only stories about the subject: other companies' deal stories don't make
+  // Infosys's off-topic news droppable.
+  const enoughOnTopic =
+    topics.length > 0 &&
+    results.filter((r) => onTopic(r) && !isNonArticle(r.url) && isAbout(r, terms, companies)).length >= TOPIC_DROP_MIN_MATCHES;
   return results.filter((r) => {
     // Index cards were picked by the index engine's own name matching.
     if (isDataCard(r)) return true;
@@ -221,7 +238,8 @@ export function refineNews(
     // Named only in the snippet ("...rivals such as Hero MotoCorp..."): keep, but below
     // stories that carry the subject in the headline or URL.
     if (!isAbout({ url: r.url, title: r.title }, terms, companies)) r.score *= PASSING_MENTION_WEIGHT;
-    if (topics.length && termHits(`${r.title} ${r.content ?? ""} ${r.url.replace(/[-_/.]+/g, " ")}`, topics) === 0) {
+    if (topics.length && !onTopic(r)) {
+      if (enoughOnTopic) return dropped.offTopic++, false;
       r.score *= TOPIC_MISS_WEIGHT;
     }
     return true;
@@ -288,8 +306,9 @@ export async function runEngine(
   engine: Engine,
   params: SearchParams,
   cache?: Cache,
+  cacheVersion = "",
 ): Promise<{ results: EngineResult[]; cached: boolean; skipped?: boolean }> {
-  const cacheKey = cache ? engineCacheKey(engine, params) : undefined;
+  const cacheKey = cache ? engineCacheKey(engine, params, cacheVersion) : undefined;
   if (cache && cacheKey) {
     const hit = await cache.match(cacheKey);
     if (hit) return { results: await hit.json<EngineResult[]>(), cached: true };
@@ -323,8 +342,10 @@ export async function runEngine(
   return { results, cached: false };
 }
 
-function engineCacheKey(engine: Engine, p: SearchParams): string {
+function engineCacheKey(engine: Engine, p: SearchParams, version: string): string {
   const u = new URL(`https://searx-cache.internal/${encodeURIComponent(engine.name)}`);
+  // The deployment's version: results cached by older code are never served after a deploy.
+  if (version) u.searchParams.set("v", version);
   u.searchParams.set("q", p.query);
   u.searchParams.set("p", String(p.pageno));
   u.searchParams.set("l", p.language);

@@ -141,3 +141,28 @@ describe("exchange filings titles", () => {
     expect(r.title).toBe("Tata Elxsi: General Updates");
   });
 });
+
+describe("exchange filings and topics", () => {
+  afterEach(() => {
+    configureTickerSearch(undefined);
+    _clearCompanyMemo();
+  });
+
+  it("keeps only on-topic filings for a topic question", async () => {
+    configureTickerSearch(async () => [
+      { nseTicker: "TATAELXSI", bseTicker: "500408", companyName: "Tata Elxsi Ltd.", isinNumber: "INE670A01012", marketCap: 21350.3, matchType: "exact_ticker", confidence: 1 },
+    ]);
+    const ctx = {
+      memo: new Map(),
+      fetch: async (input: string | URL) => {
+        const url = String(input);
+        if (url.includes("corporate-announcements")) return Response.json(JSON.parse(nseAnnFx));
+        if (url.includes("corporate-board-meetings")) return Response.json([]);
+        return new Response("not found", { status: 404 });
+      },
+    };
+    const results = await exchangeFilings.search!({ ...PARAMS, query: "Tata Elxsi auditor change", timeRange: "month" }, ctx);
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((r) => /auditor/i.test(`${r.title} ${r.content}`))).toBe(true);
+  });
+});
