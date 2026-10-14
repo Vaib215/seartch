@@ -10,7 +10,17 @@ It needs no containers, no paid search APIs and no API keys for any engine, and 
 
 ## Features
 
-- **23 ported SearXNG engines**, plus Indian financial-news engines: Google News with link decoding, Economic Times, Financial Express, Business Standard, Yandex restricted to financial publishers, and live publisher RSS feeds.
+- **23 ported SearXNG engines**, plus engines for Indian financial news and stock research:
+  - **Exchange filings:** NSE corporate announcements and upcoming board meetings, and the same day's BSE announcements. This answers "did X publish results?" from the source.
+  - **Publishers:** site search for Economic Times, Financial Express and Business Standard; Yandex restricted to nine financial publishers; and 26 live publisher RSS feeds (ET, Mint, Business Standard, CNBC TV18, BusinessLine, NDTV Profit, Business Today).
+  - **Regulators:** RBI press releases and notifications, SEBI, and PIB.
+  - Google News (with link decoding) and Bing News, available by name.
+- **News mode** (`categories: ["news"]` or `["filings"]`):
+  - **Company resolution:** maps the company a query names to every name it goes by (legal name, NSE ticker, BSE code, nicknames like RIL or HUL, the user's own wording). This needs an optional fuzzy ticker-search service; see [Company resolution](#company-resolution).
+  - **Relevance:** drops stories that mention none of those names (no TCS stories in a Tata Elxsi search), listing, topic and quote pages, social posts, and gambling or crypto spam. Stories that only mention the company in passing rank lower.
+  - **Matching:** subject words must match; reporting jargon only ranks. "Q2", "Q2FY27", "September quarter" and "period ended September 30" count as the same thing.
+  - **Real publish dates:** read from article URLs (Mint, Hindustan Times, Business Standard, dated paths) or page metadata, never from search-engine crawl dates.
+  - **Recency:** relevance decays with age, `sort: "date"` gives newest first, and `timeRange` accepts `quarter`.
 - **SearXNG behaviour:** URL normalisation and duplicate merging, `weight × hits / position` scoring, `!bang` shortcuts (`!gh tokio`, `!science attention`), categories, time ranges and paging.
 - **Engine suspension with backoff:** an engine that serves a captcha, a 403 or a 429 is switched off for a while instead of being hit again. State is kept in memory per isolate, as in SearXNG.
 - **Per-engine result caching** through the Cache API.
@@ -31,7 +41,8 @@ What works depends heavily on **where requests come from**. Many engines block d
 | general | duckduckgo, yandex, wikipedia | brave, bing, yahoo, google, qwant, startpage, mojeek, mwmbl, marginalia, yep |
 | it / packages / q&a | github, npm, crates.io, docker hub, hackernews | stackoverflow (keyless quota), pypi (JS challenge) |
 | science | arxiv, semantic scholar, openalex | |
-| news | google news, india finance news, india market feeds, economic times, financial express, business standard | bing news |
+| news | india finance news, india market feeds, economic times, financial express, business standard, exchange filings, regulators | google news (HTTP 503 to Workers), bing news (empty feed to Workers) |
+| filings | exchange filings, regulators | |
 
 Results are best-effort. A site changing its HTML, or blocking an IP range, breaks or suspends that engine until its parser is updated.
 
@@ -55,6 +66,26 @@ npx wrangler deploy
 openssl rand -hex 32 | npx wrangler secret put AUTH_TOKEN
 ```
 
+### Company resolution
+
+News relevance and exchange filings get much better when the engine knows which company a query is about. That needs a fuzzy ticker-search service that answers:
+
+```
+POST /api/stock/fuzzy  {"query": "tata elxsi", "limit": 5}
+→ {"data": [{"nseTicker": "TATAELXSI", "bseTicker": "500408", "companyName": "Tata Elxsi Ltd.",
+             "isinNumber": "INE670A01012", "marketCap": 21350.3, "matchType": "exact_ticker", "confidence": 1}]}
+```
+
+Point seartch at it with either:
+- **A service binding** named `TICKER_SEARCH`, for a Worker on the same Cloudflare account. Workers can't `fetch()` other Workers on the same account (error 1042), so this is the way for those.
+- **A secret `TICKER_SEARCH_URL`**: `npx wrangler secret put TICKER_SEARCH_URL`.
+
+Keep deployment-specific bindings out of the public config. For example, copy `wrangler.jsonc` to the gitignored `wrangler.private.jsonc`, add `"services": [{ "binding": "TICKER_SEARCH", "service": "<your-worker>" }]`, and deploy with `npx wrangler deploy -c wrangler.private.jsonc`.
+
+Without the service, nothing is resolved. News relevance then falls back to the query's subject words, and exchange filings return nothing.
+
+### Bindings and cost
+
 `wrangler.jsonc` binds only Workers AI, and only for PDF and Office conversion. If you don't want it, remove the `ai` binding; those files then return an "unsupported" error. The fetch code can also use a Browser Run (`BROWSER`) binding as a fallback for JavaScript-heavy pages, but none is configured, because Browser Run is billed separately.
 
 ## API
@@ -70,6 +101,8 @@ All endpoints except `GET /` need `Authorization: Bearer <AUTH_TOKEN>`.
   "categories": ["news", "general"],
   "engines": ["duckduckgo"],
   "timeRange": "week",
+  "sort": "relevance",
+  "verifyDates": true,
   "language": "all",
   "pageno": 1,
   "safesearch": 0,
@@ -78,7 +111,13 @@ All endpoints except `GET /` need `Authorization: Bearer <AUTH_TOKEN>`.
 }
 ```
 
-Up to 5 queries run per call. `engines` overrides `categories`. With `includeContent: true`, each result also carries its page as Markdown.
+Up to 5 queries run per call. `engines` overrides `categories`. `timeRange` is `day`, `week`, `month`, `quarter` or `year`; `sort` is `relevance` or `date`. With `includeContent: true`, each result also carries its page as Markdown.
+
+In news mode, each query's response also carries:
+- `companies`: what the query resolved to, e.g. `"Tata Elxsi Ltd. (NSE: TATAELXSI, BSE: 500408)"`.
+- `dropped`: how many results were filtered as off-topic, non-article, spam or out of range.
+
+`verifyDates: false` skips reading page metadata to date undated results.
 
 ### `POST /fetch`
 

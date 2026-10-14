@@ -30,11 +30,12 @@ import {
 import { type FeedItem, parseRss } from "./india_news";
 
 const BASE = "https://news.google.com";
-const WHEN: Record<TimeRange, string> = { day: "1d", week: "7d", month: "30d", year: "1y" };
+const WHEN: Record<TimeRange, string> = { day: "1d", week: "7d", month: "30d", quarter: "90d", year: "1y" };
 const TIME_RANGE_MS: Record<TimeRange, number> = {
   day: 86_400_000,
   week: 7 * 86_400_000,
   month: 30 * 86_400_000,
+  quarter: 91 * 86_400_000,
   year: 365 * 86_400_000,
 };
 

@@ -10,6 +10,8 @@
 
 import { cleanText, decodeEntities, mapLimit } from "../../util";
 import { CHROME_UA } from "../http";
+import { matchKey, resolveCompanies } from "../companies";
+import { containsTerm, jargonHits, mentionsSubject, normalizeText, splitQuery } from "../terms";
 import { type Engine, type EngineResult, type SearchParams, type TimeRange, EngineError } from "../types";
 import { yandex } from "./yandex";
 
@@ -17,6 +19,7 @@ const TIME_RANGE_MS: Record<TimeRange, number> = {
   day: 86_400_000,
   week: 7 * 86_400_000,
   month: 30 * 86_400_000,
+  quarter: 91 * 86_400_000,
   year: 365 * 86_400_000,
 };
 
@@ -149,33 +152,74 @@ export const indiaFinanceNews: Engine = {
 
 // --- india market feeds -------------------------------------------------------------
 
+// Each URL answered with RSS to a Worker request (tested from Cloudflare's DEL colo).
+// Moneycontrol (JS bot check), Zee Business (403) and Financial Express (HTML, but
+// covered by its own engine) are deliberately absent.
 export const MARKET_FEEDS: Record<string, string> = {
   "ET Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
   "ET Stocks": "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+  "ET Earnings": "https://economictimes.indiatimes.com/markets/stocks/earnings/rssfeeds/2146846.cms",
+  "ET Companies": "https://economictimes.indiatimes.com/news/company/corporate-trends/rssfeeds/2143429.cms",
+  "ET IPOs": "https://economictimes.indiatimes.com/markets/ipos/fpos/rssfeeds/14655708.cms",
+  "ET Economy": "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms",
   "Mint Markets": "https://www.livemint.com/rss/markets",
   "Mint Companies": "https://www.livemint.com/rss/companies",
+  "Mint Economy": "https://www.livemint.com/rss/economy",
+  "Mint Money": "https://www.livemint.com/rss/money",
   "Business Standard Markets": "https://www.business-standard.com/rss/markets-106.rss",
   "Business Standard Companies": "https://www.business-standard.com/rss/companies-101.rss",
+  "Business Standard Results": "https://www.business-standard.com/rss/companies/results-10101.rss",
+  "Business Standard Economy": "https://www.business-standard.com/rss/economy-102.rss",
+  "Business Standard Finance": "https://www.business-standard.com/rss/finance-103.rss",
+  "Business Standard IPOs": "https://www.business-standard.com/rss/markets/ipo-10611.rss",
   "CNBC TV18 Market": "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml",
+  "CNBC TV18 Earnings": "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/earnings.xml",
+  "CNBC TV18 Business": "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml",
+  "CNBC TV18 Economy": "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/economy.xml",
   "BusinessLine Markets": "https://www.thehindubusinessline.com/markets/feeder/default.rss",
+  "BusinessLine Companies": "https://www.thehindubusinessline.com/companies/feeder/default.rss",
+  "BusinessLine Economy": "https://www.thehindubusinessline.com/economy/feeder/default.rss",
   "NDTV Profit": "https://feeds.feedburner.com/ndtvprofit-latest",
   "Business Today Markets": "https://www.businesstoday.in/rssfeeds/?id=225346",
+  "Business Today": "https://www.businesstoday.in/rssfeeds/?id=home",
 };
 
-const FEED_TTL_MS = 10 * 60_000;
-const FEED_TIMEOUT_MS = 5000;
-// Words that don't help pick out a story; "Infosys news today" should match on "infosys".
-const STOPWORDS = new Set([
-  "news", "latest", "today", "update", "updates", "share", "shares", "stock", "stocks", "price",
-  "the", "a", "an", "of", "in", "on", "for", "and", "to", "is", "what", "why", "how", "india", "indian",
-]);
+// Daily operational notices (liquidity auctions, money-market data, T-bill cut-offs)
+// that match words like "repo" or "rate" but are never what a search is after.
+const ROUTINE_NOTICE = /money market operations|variable rate (reverse )?repo|\bvrr\b|\bvrrr\b|auction|treasury bills?|cut-off|weekly statistical supplement|reserve money|government stock|state government securities|sovereign gold bond.*(price|redemption)|lending rates of scheduled/i;
+const ASKS_ABOUT_OPERATIONS = /auction|money market|t-?bill|treasury|liquidity|vrr|g-?sec|bond/i;
 
-// Parsed feeds per isolate; feeds change every few minutes, not per request.
+// Official sources. `label` names the regulator, which its own feed items never mention.
+export const REGULATOR_FEEDS: Record<string, { url: string; label: string }> = {
+  "RBI Press Releases": { url: "https://www.rbi.org.in/pressreleases_rss.xml", label: "RBI Reserve Bank of India" },
+  "RBI Notifications": { url: "https://www.rbi.org.in/notifications_rss.xml", label: "RBI Reserve Bank of India" },
+  SEBI: { url: "https://www.sebi.gov.in/sebirss.xml", label: "SEBI Securities and Exchange Board of India" },
+  PIB: { url: "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3", label: "PIB Government of India" },
+};
+
+const FEED_TTL_SECONDS = 600;
+const FEED_TIMEOUT_MS = 5000;
+// Workers allow 6 connections in flight per request; leave room for the other engines.
+const FEED_CONCURRENCY = 4;
+
+// Parsed feeds per isolate, backed by the Cache API so other isolates in the
+// data center reuse them; feeds change every few minutes, not per request.
 const feedCache = new Map<string, { at: number; items: FeedItem[] }>();
 
 async function loadFeed(name: string, url: string): Promise<FeedItem[]> {
   const hit = feedCache.get(url);
-  if (hit && Date.now() - hit.at < FEED_TTL_MS) return hit.items;
+  if (hit && Date.now() - hit.at < FEED_TTL_SECONDS * 1000) return hit.items;
+  const cacheKey = `https://seartch.internal/feed?u=${encodeURIComponent(url)}`;
+  try {
+    const cached = await caches.default.match(cacheKey);
+    if (cached) {
+      const items = await cached.json<FeedItem[]>();
+      feedCache.set(url, { at: Date.now(), items });
+      return items;
+    }
+  } catch {
+    // No Cache API here (tests, previews): fetch directly.
+  }
   const res = await fetch(url, {
     headers: { "user-agent": CHROME_UA, accept: "application/rss+xml, application/xml;q=0.9, */*;q=0.8" },
     signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
@@ -186,30 +230,58 @@ async function loadFeed(name: string, url: string): Promise<FeedItem[]> {
   }
   const items = parseRss(await res.text()).map((it) => ({ ...it, source: it.source ?? name }));
   feedCache.set(url, { at: Date.now(), items });
+  try {
+    await caches.default.put(
+      cacheKey,
+      new Response(JSON.stringify(items), { headers: { "cache-control": `max-age=${FEED_TTL_SECONDS}` } }),
+    );
+  } catch {
+    // Caching is best-effort.
+  }
   return items;
 }
 
-export function queryTerms(query: string): string[] {
-  return query
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}&.-]+/u)
-    .map((w) => w.replace(/^[.-]+|[.-]+$/g, ""))
-    .filter((w) => w.length > 1 && !STOPWORDS.has(w));
+async function loadFeeds(feeds: [string, string][]): Promise<FeedItem[][]> {
+  const loaded = await mapLimit(feeds, FEED_CONCURRENCY, ([name, url]) => loadFeed(name, url).catch(() => null));
+  const ok = loaded.filter((x): x is FeedItem[] => x !== null);
+  if (!ok.length) throw new EngineError("network", "no feed could be loaded");
+  return ok;
 }
 
-/** Items whose title+description contain every query term, newest first. */
-export function filterFeedItems(items: FeedItem[], query: string): FeedItem[] {
-  const terms = queryTerms(query);
-  if (!terms.length) return [];
+/**
+ * Items about the query's subject, ranked by how much reporting jargon they
+ * share with it ("Q2", "September quarter", "results"...), then newest first.
+ * `aliases` (a resolved company's names and ticker) replace the subject words.
+ * `context` is text every item implicitly carries, e.g. the regulator's name.
+ */
+export function filterFeedItems(items: FeedItem[], query: string, aliases: string[] = [], context = ""): FeedItem[] {
+  const terms = splitQuery(query);
+  if (!terms.subject.length && !aliases.length) return [];
   const seen = new Set<string>();
-  return items
-    .filter((it) => {
-      const hay = `${it.title} ${it.description}`.toLowerCase();
-      if (!terms.every((t) => hay.includes(t)) || seen.has(it.link)) return false;
-      seen.add(it.link);
-      return true;
-    })
-    .sort((a, b) => (b.date ? Date.parse(b.date) : 0) - (a.date ? Date.parse(a.date) : 0));
+  const scored: { it: FeedItem; hits: number; t: number }[] = [];
+  for (const it of items) {
+    if (seen.has(it.link)) continue;
+    const text = `${context} ${it.title} ${it.description}`;
+    const hay = matchKey(normalizeText(text));
+    const about = aliases.length
+      ? aliases.some((a) => containsTerm(hay, matchKey(a))) || mentionsSubject(text, terms)
+      : mentionsSubject(text, terms);
+    if (!about) continue;
+    seen.add(it.link);
+    scored.push({ it, hits: jargonHits(text, terms), t: it.date ? Date.parse(it.date) : 0 });
+  }
+  scored.sort((a, b) => b.hits - a.hits || b.t - a.t);
+  return scored.map((s) => s.it);
+}
+
+function toResults(items: FeedItem[], titlePrefix = ""): EngineResult[] {
+  return items.map((it) => ({
+    url: it.link,
+    title: titlePrefix ? `${titlePrefix}: ${it.title}` : it.title,
+    content: it.description,
+    publishedDate: it.date,
+    author: it.source,
+  }));
 }
 
 export const indiaMarketFeeds: Engine = {
@@ -217,7 +289,7 @@ export const indiaMarketFeeds: Engine = {
   shortcut: "imf",
   categories: ["news"],
   timeRangeSupport: true,
-  timeout: 6000,
+  timeout: 8000,
   request() {
     return null; // not used: see search()
   },
@@ -225,17 +297,37 @@ export const indiaMarketFeeds: Engine = {
     return [];
   },
   async search(params: SearchParams) {
-    const feeds = Object.entries(MARKET_FEEDS);
-    const loaded = await mapLimit(feeds, 5, ([name, url]) => loadFeed(name, url).catch(() => null));
-    const ok = loaded.filter((x): x is FeedItem[] => x !== null);
-    if (!ok.length) throw new EngineError("network", "no market feed could be loaded");
-    const matches = filterFeedItems(ok.flat(), params.query).map((it) => ({
-      url: it.link,
-      title: it.title,
-      content: it.description,
-      publishedDate: it.date,
-      author: it.source,
-    }));
-    return withinRange(matches, params.timeRange).slice(0, 20);
+    const [feeds, companies] = await Promise.all([loadFeeds(Object.entries(MARKET_FEEDS)), resolveCompanies(params.query)]);
+    const aliases = companies.flatMap((c) => c.aliases);
+    const matches = toResults(filterFeedItems(feeds.flat(), params.query, aliases));
+    return withinRange(matches, params.timeRange).slice(0, 25);
+  },
+};
+
+export const regulators: Engine = {
+  name: "regulators",
+  shortcut: "reg",
+  categories: ["news", "filings"],
+  timeRangeSupport: true,
+  timeout: 8000,
+  request() {
+    return null; // not used: see search()
+  },
+  response() {
+    return [];
+  },
+  async search(params: SearchParams) {
+    const entries = Object.entries(REGULATOR_FEEDS);
+    const loaded = await mapLimit(entries, FEED_CONCURRENCY, ([name, f]) => loadFeed(name, f.url).catch(() => null));
+    if (loaded.every((x) => x === null)) throw new EngineError("network", "no regulator feed could be loaded");
+    const results: EngineResult[] = [];
+    const routineOk = ASKS_ABOUT_OPERATIONS.test(params.query);
+    entries.forEach(([name, f], i) => {
+      const items = loaded[i]
+        ? filterFeedItems(loaded[i], params.query, [], f.label).filter((it) => routineOk || !ROUTINE_NOTICE.test(it.title))
+        : [];
+      results.push(...toResults(items, f.label.split(" ")[0]).map((r) => ({ ...r, author: name })));
+    });
+    return withinRange(results, params.timeRange).slice(0, 15);
   },
 };

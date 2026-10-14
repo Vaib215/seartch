@@ -21,10 +21,10 @@ import { decodeEntities } from "../../util";
 import { CHROME_UA, raiseForHttpError } from "../http";
 import { extractText, htmlToText, parseHtml } from "../html";
 import { type Engine, type EngineContext, type EngineResult, type TimeRange, EngineError } from "../types";
-import { queryTerms } from "./india_news";
+import { splitQuery } from "../terms";
 
 const DAY_MS = 86_400_000;
-const TIME_RANGE_MS: Record<TimeRange, number> = { day: DAY_MS, week: 7 * DAY_MS, month: 30 * DAY_MS, year: 365 * DAY_MS };
+const TIME_RANGE_MS: Record<TimeRange, number> = { day: DAY_MS, week: 7 * DAY_MS, month: 30 * DAY_MS, quarter: 91 * DAY_MS, year: 365 * DAY_MS };
 
 function cutoff(timeRange: TimeRange): Date {
   return new Date(Date.now() - TIME_RANGE_MS[timeRange]);
@@ -218,7 +218,8 @@ function parseBs(body: any, query: string): EngineResult[] {
   if (!body || body.success !== true) {
     throw new EngineError("http", `Business Standard API: ${String(body?.message ?? "unexpected response").slice(0, 120)}`);
   }
-  const terms = queryTerms(query);
+  // Subject words only: "Q2", "results", "September quarter" are phrased too many ways to require.
+  const terms = splitQuery(query).subject;
   const results: EngineResult[] = [];
   for (const n of (body.data?.news ?? []) as BsNews[]) {
     const path = n.article_url ?? "";
@@ -249,14 +250,17 @@ export const businessStandard: Engine = {
   timeRangeSupport: true,
   about: "Business Standard site search (the site's JSON API; newest first, filtered by query)",
   request(params) {
-    // A quoted keyword keeps short tickers ("TCS") from matching "L&T", "T&D", ...
-    return { url: bsRequestUrl(`"${params.query.replace(/"/g, "")}"`, params.pageno), headers: BS_HEADERS() };
+    // A quoted subject keeps short tickers ("TCS") from matching "L&T", "T&D", ...;
+    // quoting the whole query ("tata elxsi q2 fy27 results") would demand that exact phrase.
+    const subject = splitQuery(params.query).subject.join(" ");
+    const q = subject ? `"${subject}"` : params.query.replace(/"/g, "");
+    return { url: bsRequestUrl(q, params.pageno), headers: BS_HEADERS() };
   },
   async response(resp, params, ctx: EngineContext) {
     let results = parseBs(resp.json(), params.query);
     // A quoted multi-word query is a phrase match that often finds little (and
     // nothing recent); top up from the unquoted, newest-first search.
-    if (results.length < BS_MIN_QUOTED && queryTerms(params.query).length > 1) {
+    if (results.length < BS_MIN_QUOTED && splitQuery(params.query).subject.length > 1) {
       try {
         const res = await ctx.fetch(bsRequestUrl(params.query.replace(/"/g, ""), params.pageno), {
           headers: { "user-agent": CHROME_UA, ...BS_HEADERS() },

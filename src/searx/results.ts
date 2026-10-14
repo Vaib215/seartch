@@ -1,5 +1,6 @@
 // Port of searx/results.py: merge duplicate results across engines and score them.
 
+import { dateFromUrl } from "./dates";
 import type { Engine, EngineResult } from "./types";
 
 export interface MergedResult extends EngineResult {
@@ -24,7 +25,20 @@ export function normalizeUrl(raw: string): URL | undefined {
   for (const key of [...url.searchParams.keys()]) {
     if (TRACKER_PARAMS.test(key)) url.searchParams.delete(key);
   }
+  canonicalizeAmp(url);
   return url;
+}
+
+/** Folds AMP copies into the canonical article URL so they merge as duplicates. */
+function canonicalizeAmp(url: URL) {
+  url.pathname = url.pathname
+    .replace(/\/amp_articleshow\//, "/articleshow/") // Economic Times, Times of India
+    .replace(/^\/amp\//, "/") // India Today, NDTV Profit
+    .replace(/\/amp\/?$/, "/"); // WordPress-style /amp suffix
+  for (const key of ["amp", "outputType", "amp_js_v"]) {
+    if (key === "outputType" && url.searchParams.get(key) !== "amp") continue;
+    url.searchParams.delete(key);
+  }
 }
 
 /**
@@ -50,7 +64,8 @@ export class ResultContainer {
     const key = resultKey(url);
     const existing = this.byKey.get(key);
     if (!existing) {
-      this.byKey.set(key, { ...r, url: url.href, engines: [engine], positions: [position], score: 0 });
+      const publishedDate = r.publishedDate ?? dateFromUrl(url.href);
+      this.byKey.set(key, { ...r, url: url.href, publishedDate, engines: [engine], positions: [position], score: 0 });
       return;
     }
     // merge_two_main_results: keep the longer text, fill gaps, prefer https.

@@ -1,12 +1,14 @@
 // Port of searx/engines/yandex.py (search_type "web" only)
 // Simplified: image search not ported; also treats a redirect to /showcaptcha as a CAPTCHA.
+// Changed: publishedDate comes from the article URL, not Yandex's data-mtime.
 
+import { dateFromUrl } from "../dates";
 import { extractText, parseHtml } from "../html";
 import { EngineCaptcha, type Engine, type TimeRange } from "../types";
 
 const BASE_URL_WEB = "https://yandex.com/search/site/";
 const SUPPORTED_LANGS = ["ru", "en", "be", "fr", "de", "id", "kk", "tt", "tr", "uk"];
-const TIME_RANGE_DAYS: Record<TimeRange, number> = { day: 1, week: 7, month: 30, year: 365 };
+const TIME_RANGE_DAYS: Record<TimeRange, number> = { day: 1, week: 7, month: 30, quarter: 91, year: 365 };
 
 export const yandex: Engine = {
   name: "yandex",
@@ -49,10 +51,9 @@ export const yandex: Engine = {
       const url = item.querySelector("a.b-serp-item__title-link")?.getAttribute("href") ?? "";
       const title = extractText(item.querySelector("h3.b-serp-item__title > a.b-serp-item__title-link > span"));
       const content = extractText(item.querySelector("div.b-serp-item__content div.b-serp-item__text"));
-      // published date is only shown if time range search is used
-      const mtime = item.querySelector("span[data-mtime]")?.getAttribute("data-mtime");
-      const publishedDate = mtime && /^\d+$/.test(mtime) ? new Date(Number(mtime) * 1000).toISOString() : undefined;
-      return { url, title, content, publishedDate };
+      // yandex.py reads span[data-mtime], but that is Yandex's crawl/modification
+      // time (it dated year-old articles to last week); take the date from the URL.
+      return { url, title, content, publishedDate: dateFromUrl(url) };
     });
   },
 };

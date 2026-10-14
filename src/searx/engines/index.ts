@@ -9,11 +9,12 @@ import { brave } from "./brave";
 import { crates } from "./crates";
 import { dockerHub } from "./docker_hub";
 import { duckduckgo } from "./duckduckgo";
+import { exchangeFilings } from "./exchange_filings";
 import { github } from "./github";
 import { google } from "./google";
 import { googleNews } from "./google_news";
 import { hackernews } from "./hackernews";
-import { bingNews, indiaFinanceNews, indiaMarketFeeds } from "./india_news";
+import { bingNews, indiaFinanceNews, indiaMarketFeeds, regulators } from "./india_news";
 import { businessStandard, economicTimes, financialExpress } from "./india_publishers";
 import { marginalia } from "./marginalia";
 import { mojeek } from "./mojeek";
@@ -39,6 +40,8 @@ const ALL: Engine[] = [
   arxiv, semanticScholar, openalex,
   // news (Indian markets)
   googleNews, bingNews, indiaFinanceNews, indiaMarketFeeds, economicTimes, financialExpress, businessStandard,
+  // official sources
+  exchangeFilings, regulators,
 ];
 
 /**
@@ -47,15 +50,16 @@ const ALL: Engine[] = [
  * DuckDuckGo and Yandex work there (Mwmbl too, but returns spam). Brave, Yahoo, Google, Qwant,
  * Startpage, Mojeek and Yep block Worker requests; Bing answers but with
  * off-topic results; StackOverflow's keyless API quota is exhausted on shared
- * Cloudflare IPs; Bing News returns an empty feed to Worker requests (it works
- * from residential IPs, so it stays available by name). Everything else can
+ * Cloudflare IPs; Bing News returns an empty feed and Google News HTTP 503 to
+ * Worker requests (both work from residential IPs, so they stay available by name). Everything else can
  * still be selected by name or `!bang`.
  */
 const DEFAULTS = new Set([
   "duckduckgo", "yandex", "wikipedia",
   "github", "npm", "crates.io", "docker hub", "hackernews",
   "arxiv", "semantic scholar", "openalex",
-  "google news", "india finance news", "india market feeds", "economic times", "financial express", "business standard",
+  "india finance news", "india market feeds", "economic times", "financial express", "business standard",
+  "exchange filings", "regulators",
 ]);
 
 export const ENGINES: Engine[] = ALL.map((e) => ({ ...e, disabled: !DEFAULTS.has(e.name) }));

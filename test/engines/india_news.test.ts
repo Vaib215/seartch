@@ -4,7 +4,6 @@ import {
   filterFeedItems,
   indiaFinanceNews,
   parseRss,
-  queryTerms,
   unwrapBingNews,
 } from "../../src/searx/engines/india_news";
 import bingFx from "../fixtures/bing_news.xml?raw";
@@ -62,14 +61,35 @@ describe("india market feeds", () => {
     }
   });
 
-  it("matches every meaningful term and sorts newest first", () => {
+  it("requires the subject, ranks by shared jargon, then newest first", () => {
     const items = [
       { title: "Infosys Q2 preview", link: "https://a/1", description: "", date: "2026-10-07T00:00:00Z" },
       { title: "TCS and Infosys rally", link: "https://a/2", description: "IT stocks up", date: "2026-10-08T00:00:00Z" },
       { title: "Wipro results", link: "https://a/3", description: "", date: "2026-10-08T01:00:00Z" },
     ];
     expect(filterFeedItems(items, "Infosys news today").map((i) => i.link)).toEqual(["https://a/2", "https://a/1"]);
-    expect(filterFeedItems(items, "infosys q2").map((i) => i.link)).toEqual(["https://a/1"]);
-    expect(queryTerms("Latest news on M&M shares")).toEqual(["m&m"]);
+    // Jargon no longer has to match; it only ranks.
+    expect(filterFeedItems(items, "infosys q2").map((i) => i.link)).toEqual(["https://a/1", "https://a/2"]);
+  });
+
+  it("treats Q2, Q2FY27 and 'September quarter' as the same thing", () => {
+    const items = [
+      { title: "Tata Elxsi shares jump 7% after Q2 results", link: "https://a/1", description: "", date: "2026-10-14T05:00:00Z" },
+      { title: "Tata Elxsi September quarter profit rises 10%", link: "https://a/2", description: "", date: "2026-10-13T12:00:00Z" },
+      { title: "Tata Elxsi Q2FY27: margins expand", link: "https://a/3", description: "", date: "2026-10-13T13:00:00Z" },
+      { title: "TCS Q2 results: profit up 15%", link: "https://a/4", description: "Tata group IT major", date: "2026-10-08T12:00:00Z" },
+    ];
+    const long = filterFeedItems(items, "Tata Elxsi Q2 FY27 results").map((i) => i.link);
+    const short = filterFeedItems(items, "Tata Elxsi Q2 results").map((i) => i.link);
+    expect(new Set(long)).toEqual(new Set(["https://a/1", "https://a/2", "https://a/3"]));
+    expect(new Set(short)).toEqual(new Set(long));
+  });
+
+  it("matches a resolved company's aliases instead of the query words", () => {
+    const items = [
+      { title: "Reliance Industries Q2 profit beats estimates", link: "https://a/1", description: "", date: "2026-10-14T00:00:00Z" },
+      { title: "April auto sales", link: "https://a/2", description: "", date: "2026-10-14T00:00:00Z" },
+    ];
+    expect(filterFeedItems(items, "RIL results", ["ril", "reliance industries"]).map((i) => i.link)).toEqual(["https://a/1"]);
   });
 });

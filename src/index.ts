@@ -3,7 +3,9 @@ import { RENDER_MODES, fetchPages, type PageResult } from "./fetch";
 import { createServer } from "./mcp";
 import { ENGINES, ENGINE_BY_NAME } from "./searx/engines";
 import { EngineHealth } from "./searx/health";
-import { CATEGORIES, type SearchRequest, type SearchResponse, metasearch, runEngine } from "./searx/search";
+import { configureTickerSearch, httpTickerLookup, resolveCompanies, tickerSearchConfigured, type TickerLookup } from "./searx/companies";
+import { fetchPublishedDate } from "./searx/dates";
+import { CATEGORIES, SORT_ORDERS, type SearchRequest, type SearchResponse, metasearch, runEngine } from "./searx/search";
 import { type Category, type SafeSearch, type TimeRange, EngineError } from "./searx/types";
 import { HttpError, errorMessage, intInRange, json, mapLimit, oneOf, readJson, stringList } from "./util";
 
@@ -11,6 +13,10 @@ export interface Env {
   AUTH_TOKEN?: string;
   BROWSER?: Fetcher;
   AI?: Ai;
+  /** Fuzzy ticker-search service as a service binding (preferred for a Worker on the same account). */
+  TICKER_SEARCH?: Fetcher;
+  /** ...or its base URL. Either one enables company resolution and exchange filings. */
+  TICKER_SEARCH_URL?: string;
 }
 
 const MAX_QUERIES = 5;
@@ -25,6 +31,7 @@ const QUERY_CONCURRENCY = 2;
 export default {
   async fetch(req, env, ctx): Promise<Response> {
     const { pathname } = new URL(req.url);
+    configureTickerSearch(tickerLookupFor(env));
     try {
       if (req.method === "GET" && pathname === "/") {
         return json({ ok: true, endpoints: ["POST /search", "POST /fetch", "GET /engines", "POST /engines/test", "/mcp"] });
@@ -65,8 +72,9 @@ export default {
  * POST /search
  * {
  *   "queries": ["..."], "limit": 10, "pageno": 1, "language": "all", "safesearch": 0,
- *   "timeRange": "week", "categories": ["general"], "engines": ["brave"],
- *   "includeContent": false, "render": "auto", "archiveFallback": false
+ *   "timeRange": "week" | "quarter" | ..., "sort": "relevance" | "date",
+ *   "categories": ["news", "filings", "general"], "engines": ["nse filings"],
+ *   "verifyDates": true, "includeContent": false, "render": "auto", "archiveFallback": false
  * }
  * Queries support SearXNG bangs: "!gh rust http", "!it tokio".
  */
@@ -80,7 +88,13 @@ async function handleSearch(body: Record<string, unknown>, env: Env) {
   const responses: SearchResponse[] = await mapLimit(queries, QUERY_CONCURRENCY, (query) =>
     metasearch(
       { ...base, query },
-      { health: state, recordOutcomes: (o) => health.record(o), cache: caches.default },
+      {
+        health: state,
+        recordOutcomes: (o) => health.record(o),
+        cache: caches.default,
+        publishedDate: (url) => fetchPublishedDate(url),
+        resolveCompanies: tickerSearchConfigured() ? resolveCompanies : undefined,
+      },
     ),
   );
   const results = responses.map((r) => ({ ...r, results: r.results.slice(0, limit) }));
@@ -109,7 +123,12 @@ function searchOptions(body: Record<string, unknown>): Omit<SearchRequest, "quer
     pageno: intInRange(body.pageno, "pageno", 1, 10, 1),
     language,
     safesearch: intInRange(body.safesearch, "safesearch", 0, 2, 0) as SafeSearch,
-    timeRange: body.timeRange == null ? undefined : oneOf(body.timeRange, "timeRange", ["day", "week", "month", "year"] as const, "day") as TimeRange,
+    timeRange:
+      body.timeRange == null
+        ? undefined
+        : (oneOf(body.timeRange, "timeRange", ["day", "week", "month", "quarter", "year"] as const, "day") as TimeRange),
+    sort: oneOf(body.sort, "sort", SORT_ORDERS, "relevance"),
+    verifyDates: body.verifyDates !== false,
     categories: categories as Category[] | undefined,
     engines,
   };
@@ -184,6 +203,19 @@ async function testEngines(body: Record<string, unknown>) {
 
 /** Engine suspension state, shared by every request this isolate serves. */
 const health = new EngineHealth();
+
+function tickerLookupFor(env: Env): TickerLookup | undefined {
+  const post = (path: string, body: string) => ({ method: "POST", headers: { "content-type": "application/json" }, body });
+  if (env.TICKER_SEARCH) {
+    const binding = env.TICKER_SEARCH;
+    return httpTickerLookup((path, body) => binding.fetch(new Request(`https://ticker-search${path}`, post(path, body))));
+  }
+  if (env.TICKER_SEARCH_URL) {
+    const base = env.TICKER_SEARCH_URL.replace(/\/+$/, "");
+    return httpTickerLookup((path, body) => fetch(`${base}${path}`, { ...post(path, body), signal: AbortSignal.timeout(3000) }));
+  }
+  return undefined;
+}
 
 async function authorize(req: Request, env: Env) {
   if (!env.AUTH_TOKEN) throw new HttpError(500, "AUTH_TOKEN secret is not configured");

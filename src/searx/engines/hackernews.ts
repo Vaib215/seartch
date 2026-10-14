@@ -25,6 +25,7 @@ const RANGE_DAYS: Record<TimeRange, (d: Date) => void> = {
   day: (d) => d.setUTCDate(d.getUTCDate() - 1),
   week: (d) => d.setUTCDate(d.getUTCDate() - 7),
   month: (d) => d.setUTCMonth(d.getUTCMonth() - 1),
+  quarter: (d) => d.setUTCMonth(d.getUTCMonth() - 3),
   year: (d) => d.setUTCFullYear(d.getUTCFullYear() - 1),
 };
 

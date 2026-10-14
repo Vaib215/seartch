@@ -2,10 +2,10 @@
 // to Cloudflare Workers. An engine builds one HTTP request for a query and
 // parses the response into results; the orchestrator does everything else.
 
-export type Category = "general" | "it" | "science" | "news" | "packages" | "repos" | "q&a";
+export type Category = "general" | "it" | "science" | "news" | "filings" | "packages" | "repos" | "q&a";
 
 export type SafeSearch = 0 | 1 | 2;
-export type TimeRange = "day" | "week" | "month" | "year";
+export type TimeRange = "day" | "week" | "month" | "quarter" | "year";
 
 export interface SearchParams {
   query: string;

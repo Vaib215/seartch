@@ -22,6 +22,8 @@ interface SearchOut {
   query: string;
   results: Hit[];
   unresponsiveEngines: { engine: string; error: string; suspended: boolean }[];
+  dropped?: { nonArticle: number; spam: number; offTopic: number; outOfRange: number };
+  companies?: string[];
 }
 
 const DEFAULT_SEARCH_CONTENT_CHARS = 4000;
@@ -35,11 +37,14 @@ export function createServer(backends: ToolBackends): McpServer {
     {
       title: "Web search",
       description:
-        "Search the web with a SearXNG-style metasearch across several engines. " +
-        "Accepts up to 5 queries at once. Supports SearXNG bangs in queries (e.g. '!gh tokio', '!science attention'). " +
-        "For news, set categories ['news'] (Bing News, Indian financial publishers via Yandex, and live ET/Mint/BS/CNBC TV18 " +
-        "feeds) and a timeRange; add 'general' too for wider coverage. " +
-        "Set includeContent to also get each result page as Markdown.",
+        "Metasearch across many engines (a SearXNG port), tuned for Indian financial news and stock research. " +
+        "Up to 5 queries per call. " +
+        "For news and company research, set categories ['news'] (Indian publishers: ET, Mint, Business Standard, " +
+        "Financial Express, CNBC TV18, BusinessLine and more; Google News; NSE filings; RBI/SEBI) and a timeRange; " +
+        "add 'filings' for exchange announcements and board-meeting outcomes only. News mode drops off-topic stories, " +
+        "listing/quote pages and spam, dates results from the article itself, and accepts sort 'date' for newest first. " +
+        "Name the company plainly ('Tata Elxsi Q2 results', 'RIL dividend'); tickers and common names both work. " +
+        "Supports SearXNG bangs ('!gh tokio', '!science attention'). includeContent returns each page as Markdown.",
       inputSchema: {
         queries: z.array(z.string().min(1)).min(1).max(5).describe("Search queries, run in parallel"),
         limit: z.number().int().min(1).max(30).optional().describe("Results per query (default 8)"),
@@ -48,7 +53,8 @@ export function createServer(backends: ToolBackends): McpServer {
           .array(z.enum(ENGINES.map((e) => e.name) as [string, ...string[]]))
           .optional()
           .describe("Specific engines; overrides categories"),
-        timeRange: z.enum(["day", "week", "month", "year"]).optional(),
+        timeRange: z.enum(["day", "week", "month", "quarter", "year"]).optional(),
+        sort: z.enum(["relevance", "date"]).optional().describe('"date": newest first (undated last). Default relevance'),
         language: z.string().optional().describe('"all" (default), "en", "en-US", ...'),
         includeContent: z.boolean().optional().describe("Fetch each result page as Markdown (slower)"),
         maxContentChars: z.number().int().min(200).max(50_000).optional().describe("Per-page Markdown cap when includeContent (default 4000)"),
@@ -98,10 +104,11 @@ async function run(fn: () => Promise<string>) {
 
 function formatSearch(r: SearchOut, maxChars: number): string {
   const lines = [`## Results for "${r.query}"`];
+  if (r.companies?.length) lines.push(`_Company: ${r.companies.join(", ")}_`);
   if (!r.results.length) lines.push("No results.");
   r.results.forEach((h, i) => {
     lines.push(`${i + 1}. [${h.title}](${h.url})`);
-    const meta = [h.engines.join(", "), h.publishedDate?.slice(0, 10)].filter(Boolean).join(" · ");
+    const meta = [h.author, h.publishedDate?.slice(0, 10), `via ${h.engines.join(", ")}`].filter(Boolean).join(" · ");
     lines.push(`   ${meta}`);
     if (h.content) lines.push(`   ${h.content}`);
     if (h.markdown) {
@@ -110,6 +117,11 @@ function formatSearch(r: SearchOut, maxChars: number): string {
       lines.push(`   (content unavailable: ${h.contentError})`);
     }
   });
+  const d = r.dropped;
+  const droppedTotal = d ? d.nonArticle + d.spam + d.offTopic + d.outOfRange : 0;
+  if (d && droppedTotal) {
+    lines.push(`\n_Filtered out: ${d.offTopic} off-topic, ${d.nonArticle} listing/quote pages, ${d.spam} spam, ${d.outOfRange} outside the time range_`);
+  }
   const down = r.unresponsiveEngines.map((u) => `${u.engine}${u.suspended ? " (suspended)" : ""}`);
   if (down.length) lines.push(`\n_Engines unavailable: ${down.join(", ")}_`);
   return lines.join("\n");
