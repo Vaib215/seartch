@@ -14,6 +14,7 @@ import { github } from "./github";
 import { google } from "./google";
 import { googleNews } from "./google_news";
 import { hackernews } from "./hackernews";
+import { indexData } from "./index_data";
 import { bingNews, indiaFinanceNews, indiaMarketFeeds, regulators } from "./india_news";
 import { businessStandard, economicTimes, financialExpress } from "./india_publishers";
 import { marginalia } from "./marginalia";
@@ -41,7 +42,7 @@ const ALL: Engine[] = [
   // news (Indian markets)
   googleNews, bingNews, indiaFinanceNews, indiaMarketFeeds, economicTimes, financialExpress, businessStandard,
   // official sources
-  exchangeFilings, regulators,
+  exchangeFilings, regulators, indexData,
 ];
 
 /**
@@ -59,7 +60,7 @@ const DEFAULTS = new Set([
   "github", "npm", "crates.io", "docker hub", "hackernews",
   "arxiv", "semantic scholar", "openalex",
   "india finance news", "india market feeds", "economic times", "financial express", "business standard",
-  "exchange filings", "regulators",
+  "exchange filings", "regulators", "index data",
 ]);
 
 export const ENGINES: Engine[] = ALL.map((e) => ({ ...e, disabled: !DEFAULTS.has(e.name) }));

@@ -10,8 +10,8 @@
 
 import { cleanText, decodeEntities, mapLimit } from "../../util";
 import { CHROME_UA } from "../http";
-import { matchKey, resolveCompanies } from "../companies";
-import { containsTerm, jargonHits, mentionsSubject, normalizeText, splitQuery } from "../terms";
+import { resolveCompanies } from "../companies";
+import { jargonHits, mentionsSubject, namesCompany, splitQuery, termHits, topicTerms } from "../terms";
 import { type Engine, type EngineResult, type SearchParams, type TimeRange, EngineError } from "../types";
 import { yandex } from "./yandex";
 
@@ -189,6 +189,22 @@ export const MARKET_FEEDS: Record<string, string> = {
 const ROUTINE_NOTICE = /money market operations|variable rate (reverse )?repo|\bvrr\b|\bvrrr\b|auction|treasury bills?|cut-off|weekly statistical supplement|reserve money|government stock|state government securities|sovereign gold bond.*(price|redemption)|lending rates of scheduled/i;
 const ASKS_ABOUT_OPERATIONS = /auction|money market|t-?bill|treasury|liquidity|vrr|g-?sec|bond/i;
 
+// Regulator feeds run only when the query is about that regulator or regulation,
+// so RBI notices don't leak into searches like "Nifty 50 one year return".
+const REGULATOR_TOPICS: { re: RegExp; feeds: string[] }[] = [
+  {
+    re: /\b(rbi|reserve bank|repo|reverse repo|monetary policy|mpc|crr|slr|rate (hike|cut|decision)|forex reserves?|liquidity|nbfc rules?|banking regulat\w*)\b/i,
+    feeds: ["RBI Press Releases", "RBI Notifications"],
+  },
+  { re: /\b(sebi|securities and exchange board|f&o (rules|curbs|framework)|circular|lodr|insider trading|market regulator)\b/i, feeds: ["SEBI"] },
+  { re: /\b(pib|government of india|ministry|cabinet|gst council|finance minister|budget)\b/i, feeds: ["PIB"] },
+  { re: /\b(regulat(or|ors|ion|ions|ory)|notification|policy)\b/i, feeds: ["RBI Press Releases", "RBI Notifications", "SEBI", "PIB"] },
+];
+
+export function regulatorFeedsFor(query: string): string[] {
+  return [...new Set(REGULATOR_TOPICS.filter((t) => t.re.test(query)).flatMap((t) => t.feeds))];
+}
+
 // Official sources. `label` names the regulator, which its own feed items never mention.
 export const REGULATOR_FEEDS: Record<string, { url: string; label: string }> = {
   "RBI Press Releases": { url: "https://www.rbi.org.in/pressreleases_rss.xml", label: "RBI Reserve Bank of India" },
@@ -257,18 +273,17 @@ async function loadFeeds(feeds: [string, string][]): Promise<FeedItem[][]> {
 export function filterFeedItems(items: FeedItem[], query: string, aliases: string[] = [], context = ""): FeedItem[] {
   const terms = splitQuery(query);
   if (!terms.subject.length && !aliases.length) return [];
+  const topics = aliases.length ? topicTerms(query, aliases) : [];
   const seen = new Set<string>();
   const scored: { it: FeedItem; hits: number; t: number }[] = [];
   for (const it of items) {
     if (seen.has(it.link)) continue;
     const text = `${context} ${it.title} ${it.description}`;
-    const hay = matchKey(normalizeText(text));
-    const about = aliases.length
-      ? aliases.some((a) => containsTerm(hay, matchKey(a))) || mentionsSubject(text, terms)
-      : mentionsSubject(text, terms);
+    const about = aliases.length ? namesCompany(text, terms, aliases) : mentionsSubject(text, terms);
     if (!about) continue;
     seen.add(it.link);
-    scored.push({ it, hits: jargonHits(text, terms), t: it.date ? Date.parse(it.date) : 0 });
+    // Topic words ("deal wins") outrank reporting jargon ("results").
+    scored.push({ it, hits: 2 * termHits(text, topics) + jargonHits(text, terms), t: it.date ? Date.parse(it.date) : 0 });
   }
   scored.sort((a, b) => b.hits - a.hits || b.t - a.t);
   return scored.map((s) => s.it);
@@ -317,7 +332,9 @@ export const regulators: Engine = {
     return [];
   },
   async search(params: SearchParams) {
-    const entries = Object.entries(REGULATOR_FEEDS);
+    const wanted = regulatorFeedsFor(params.query);
+    if (!wanted.length) return [];
+    const entries = Object.entries(REGULATOR_FEEDS).filter(([name]) => wanted.includes(name));
     const loaded = await mapLimit(entries, FEED_CONCURRENCY, ([name, f]) => loadFeed(name, f.url).catch(() => null));
     if (loaded.every((x) => x === null)) throw new EngineError("network", "no regulator feed could be loaded");
     const results: EngineResult[] = [];

@@ -8,7 +8,7 @@ import { raiseForHttpError, send } from "./http";
 import type { Company } from "./companies";
 import { type CompanyLike, isAbout, isNonArticle, isSpam } from "./news_filter";
 import { type MergedResult, ResultContainer } from "./results";
-import { splitQuery } from "./terms";
+import { splitQuery, termHits, topicTerms } from "./terms";
 import {
   type Category,
   type Engine,
@@ -35,6 +35,8 @@ const TIME_RANGE_MS: Record<TimeRange, number> = {
 // Publishers and engines disagree by hours on "today"; don't cut exactly at the edge.
 const RANGE_SLACK_MS = DAY_MS;
 const PASSING_MENTION_WEIGHT = 0.4;
+// "Infosys deal wins": stories about Infosys but not about deals rank below those that are.
+const TOPIC_MISS_WEIGHT = 0.35;
 // News mode reads page metadata to date this many top undated results.
 const DATE_CHECKS = 6;
 const DATE_CHECK_CONCURRENCY = 4;
@@ -191,8 +193,14 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
   } else {
     results = withinTimeRange(results, params.timeRange);
   }
-  response.results = req.sort === "date" ? sortByDate(results) : results;
+  results = req.sort === "date" ? sortByDate(results) : results;
+  // Data cards (index levels and returns) answer the question; keep them on top.
+  response.results = [...results.filter(isDataCard), ...results.filter((r) => !isDataCard(r))];
   return response;
+}
+
+function isDataCard(r: MergedResult): boolean {
+  return r.engines.includes("index data");
 }
 
 /** Drops non-articles, spam and results that aren't about the query's subject. */
@@ -203,13 +211,19 @@ export function refineNews(
   dropped: { nonArticle: number; spam: number; offTopic: number },
 ): MergedResult[] {
   const terms = splitQuery(query);
+  const topics = companies.length ? topicTerms(query, companies.flatMap((c) => c.aliases)) : [];
   return results.filter((r) => {
+    // Index cards were picked by the index engine's own name matching.
+    if (isDataCard(r)) return true;
     if (isNonArticle(r.url)) return dropped.nonArticle++, false;
     if (isSpam(r.title, r.content, query)) return dropped.spam++, false;
     if (!isAbout(r, terms, companies)) return dropped.offTopic++, false;
     // Named only in the snippet ("...rivals such as Hero MotoCorp..."): keep, but below
     // stories that carry the subject in the headline or URL.
     if (!isAbout({ url: r.url, title: r.title }, terms, companies)) r.score *= PASSING_MENTION_WEIGHT;
+    if (topics.length && termHits(`${r.title} ${r.content ?? ""} ${r.url.replace(/[-_/.]+/g, " ")}`, topics) === 0) {
+      r.score *= TOPIC_MISS_WEIGHT;
+    }
     return true;
   });
 }

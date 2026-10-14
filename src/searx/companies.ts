@@ -8,7 +8,7 @@
 //   → { data: [{ nseTicker, bseTicker, companyName, isinNumber, marketCap, matchType, confidence }] }
 // Without it, nothing resolves and news relevance falls back to the query words.
 
-import { splitQuery } from "./terms";
+import { INDEX_WORDS, splitQuery } from "./terms";
 
 export interface Company {
   name: string;
@@ -136,8 +136,9 @@ export function aliasesFor(m: FuzzyMatch, phrase: string): string[] {
   if (m.nseTicker && !/^\d+$/.test(m.nseTicker)) aliases.add(m.nseTicker.toLowerCase());
   if (m.bseTicker) aliases.add(m.bseTicker);
   for (const a of EXTRA_ALIASES[m.nseTicker ?? ""] ?? []) aliases.add(a);
-  // The user's own wording, when it is a name rather than a question.
-  if (phrase.length >= 2 && phrase.split(" ").length <= 4) aliases.add(phrase);
+  // The user's own wording ("zomato", "indigo"), when it is short enough to be a name
+  // rather than a name plus a topic ("infosys deal wins").
+  if (phrase.length >= 2 && phrase.split(" ").length <= 2) aliases.add(phrase);
   return [...new Set([...aliases].map(matchKey))].filter((a) => a.length >= 2);
 }
 
@@ -151,13 +152,25 @@ function toCompany(m: FuzzyMatch, phrase: string): Company {
   };
 }
 
+// Sector and commodity words that name markets, not companies ("gold price today",
+// "pharma stocks"); as a whole phrase they never resolve.
+const GENERIC_PHRASES = new Set([
+  "gold", "silver", "oil", "crude", "steel", "power", "energy", "bank", "banks", "banking", "pharma", "auto", "metal",
+  "metals", "it", "fmcg", "realty", "media", "infra", "cement", "sugar", "textile", "textiles", "psu", "defence",
+  "railway", "railways", "ipo", "ipos", "market", "markets", "stock market", "share market", "rupee", "bond", "bonds",
+  "inflation", "gdp", "budget", "tax", "gst", "fii", "dii", "fpi", "mutual fund", "mutual funds", "sip", "crypto",
+]);
+
 /** Subject phrases per compared company: "TCS vs Infosys Q2" → ["tcs", "infosys"]. */
 export function subjectPhrases(query: string): string[] {
   const parts = query.split(/\s+(?:vs\.?|versus|compared (?:to|with)|against)\s+|\s*[,;]\s*/i);
   const phrases: string[] = [];
   for (const part of parts) {
+    // "Nifty 50 one year return" is about an index, not a listed company.
+    if (INDEX_WORDS.test(part)) continue;
     let phrase = splitQuery(part).subject.join(" ");
     phrase = ABBREVIATIONS[phrase] ?? phrase;
+    if (GENERIC_PHRASES.has(phrase)) continue;
     if (phrase && !phrases.includes(phrase)) phrases.push(phrase);
   }
   return phrases.slice(0, 3);
@@ -185,8 +198,15 @@ export function resolveCompanies(query: string): Promise<Company[]> {
 async function resolve(query: string, search: TickerLookup): Promise<Company[]> {
   const found = await Promise.all(
     subjectPhrases(query).map(async (phrase) => {
-      const m = pickMatch(await search(phrase, 5));
-      return m ? toCompany(m, phrase) : undefined;
+      // "infosys deal wins" may not match as a whole; fall back to its leading words.
+      const words = phrase.split(" ");
+      for (let n = words.length; n >= 1 && n > words.length - 3; n--) {
+        const attempt = words.slice(0, n).join(" ");
+        if (GENERIC_PHRASES.has(attempt)) continue;
+        const m = pickMatch(await search(attempt, 5));
+        if (m) return toCompany(m, attempt);
+      }
+      return undefined;
     }),
   );
   const seen = new Set<string>();

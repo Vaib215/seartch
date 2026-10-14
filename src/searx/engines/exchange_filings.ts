@@ -4,8 +4,9 @@
 // media coverage. Needs the ticker-search service to resolve the company.
 
 import { type Company, resolveCompanies } from "../companies";
+import { filingSubject } from "../filing_text";
 import { CHROME_UA } from "../http";
-import { jargonHits, splitQuery } from "../terms";
+import { jargonHits, splitQuery, termHits, topicTerms } from "../terms";
 import {
   type Engine,
   type EngineContext,
@@ -213,6 +214,76 @@ function mapBse(items: BseItem[], company: Company): Filing[] {
     }));
 }
 
+// --- Screener: the latest few BSE announcements with written summaries ------------
+// screener.in company pages list a company's five latest BSE filings, each with a
+// one-line summary that often carries the key figures ("revenue of Rs 1,055.7 Cr,
+// up 15% YoY"). robots.txt allows /company/ pages; each is fetched at most every 6h.
+
+const SCREENER_TTL_MS = 6 * 3_600_000;
+const screenerCache = new Map<string, { at: number; html: string }>();
+
+export function parseScreenerAnnouncements(html: string, company: Company): Filing[] {
+  const start = html.indexOf('id="documents"');
+  const section = start >= 0 ? html.slice(start) : html;
+  const out: Filing[] = [];
+  const re = /<a\s+href="(https:\/\/www\.bseindia\.com\/(?:stockinfo\/AnnPdfOpen\.aspx\?Pname=|xml-data\/corpfiling\/Attach(?:Live|His)\/)[^"]+)"[^>]*>([\s\S]*?)<div[^>]*>\s*<time datetime="([^"]+)"[^>]*>[^<]*<\/time>\s*-?\s*([\s\S]*?)<\/div>/g;
+  for (const m of section.matchAll(re)) {
+    const time = Date.parse(m[3]);
+    if (Number.isNaN(time)) continue;
+    const category = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").replace(/^Announcement under Regulation 30 \(LODR\)-\s*/i, "").trim();
+    const text = m[4].replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+    out.push({ source: "BSE", company, time, category: category || "BSE announcement", text, url: m[1] });
+  }
+  return out;
+}
+
+async function screenerFilings(ctx: EngineContext, c: Company): Promise<Filing[]> {
+  const id = c.nse ?? c.bse;
+  if (!id) return [];
+  let html = screenerCache.get(id);
+  if (!html || Date.now() - html.at > SCREENER_TTL_MS) {
+    const res = await ctx.fetch(`https://www.screener.in/company/${encodeURIComponent(id)}/`, {
+      headers: { "user-agent": CHROME_UA, accept: "text/html" },
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return [];
+    }
+    html = { at: Date.now(), html: await res.text() };
+    screenerCache.set(id, html);
+  }
+  return parseScreenerAnnouncements(html.html, c);
+}
+
+/** BSE attachment id (the PDF's GUID), shared by the feed and Screener links. */
+function bseDocId(url: string): string | undefined {
+  return /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.pdf/i.exec(url)?.[1]?.toLowerCase();
+}
+
+/**
+ * Screener's summaries are better snippets than NSE's boilerplate: copy them onto
+ * the matching NSE filing (same filing within 90 minutes) and return only the
+ * Screener items NSE doesn't have.
+ */
+export function mergeSummaries(nse: Filing[], screener: Filing[]): Filing[] {
+  const unmatched: Filing[] = [];
+  for (const s of screener) {
+    const words = SIGNIFICANT(`${s.category} ${s.text}`);
+    let match: Filing | undefined;
+    let best = 0;
+    for (const n of nse) {
+      if (Math.abs(n.time - s.time) > 90 * 60_000) continue;
+      const other = SIGNIFICANT(`${n.category} ${n.text}`);
+      let shared = 0;
+      for (const w of words) if (other.has(w)) shared++;
+      if (shared > best) [match, best] = [n, shared];
+    }
+    if (!match) unmatched.push(s);
+    else if (s.text.length > 20 && (isWeakFiling(match) || s.text.length > match.text.length)) match.text = s.text;
+  }
+  return unmatched;
+}
+
 const SIGNIFICANT = (s: string) =>
   new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !/^(with|from|that|this|have|been|under|regulation|company|limited)$/.test(w)));
 
@@ -230,10 +301,57 @@ export function dropCrossListed(bse: Filing[], nse: Filing[]): Filing[] {
   });
 }
 
-/** Most relevant to the question first (upcoming meetings when asked about them), then newest. */
+// Categories that say nothing on their own; without a subject line these filings are dropped.
+const GENERIC_CATEGORY = /^(general updates|updates|bse announcement|copy of newspaper publication|other|disclosure)$/i;
+// How many weak filings per query get their PDF read for a subject line.
+const ENRICH_LIMIT = 6;
+const ENRICH_CONCURRENCY = 3;
+const ENRICH_BUDGET_MS = 7000;
+
+/** A snippet that doesn't tell the reader what the filing is. */
+export function isWeakFiling(f: Filing): boolean {
+  const text = f.text.trim().toLowerCase();
+  return (
+    !text ||
+    text === f.category.toLowerCase() ||
+    text.length < 50 ||
+    /^the financial results for the period ended/.test(text) ||
+    (GENERIC_CATEGORY.test(f.category) && text.length < 80)
+  );
+}
+
+/** Still nothing to say after enrichment: a generic category with an empty or repeated summary. */
+export function isEmptyFiling(f: Filing): boolean {
+  const text = f.text.trim().toLowerCase();
+  return GENERIC_CATEGORY.test(f.category) && (!text || text === f.category.toLowerCase());
+}
+
+/** Replaces weak snippets with the filing's own subject line, read from its PDF. */
+async function enrichFromPdfs(filings: Filing[]) {
+  const weak = filings.filter((f) => isWeakFiling(f) && /\.pdf($|\?)/i.test(f.url)).slice(0, ENRICH_LIMIT);
+  const deadline = Date.now() + ENRICH_BUDGET_MS;
+  let next = 0;
+  const worker = async () => {
+    while (next < weak.length && Date.now() < deadline) {
+      const f = weak[next++];
+      const subject = await filingSubject(f.url).catch(() => undefined);
+      if (subject) f.text = subject;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ENRICH_CONCURRENCY, weak.length) }, worker));
+}
+
+/**
+ * Most relevant to the question first: topic words ("deal", "acquisition") count
+ * double, reporting jargon ("results", "board meeting") single; then newest.
+ */
 export function rankFilings(filings: Filing[], query: string): Filing[] {
   const terms = splitQuery(query);
-  const hits = (f: Filing) => jargonHits(`${f.category} ${f.text}`, terms);
+  const topics = topicTerms(query, filings.flatMap((f) => f.company.aliases));
+  const hits = (f: Filing) => {
+    const text = `${f.category} ${f.text}`;
+    return 2 * termHits(text, topics) + jargonHits(text, terms);
+  };
   return [...filings].sort((a, b) => hits(b) - hits(a) || b.time - a.time);
 }
 
@@ -242,7 +360,8 @@ export function toResult(f: Filing): EngineResult {
   const summary = f.text.replace(/\.$/, "");
   // Skip the summary when it only repeats the category ("General Updates — General Updates").
   const repeats = summary.toLowerCase() === f.category.toLowerCase();
-  const detail = summary && !repeats && summary.length < 160 ? ` — ${summary}` : "";
+  const short = summary.length <= 140 ? summary : `${summary.slice(0, 139).replace(/\s+\S*$/, "")}…`;
+  const detail = summary && !repeats ? ` — ${short}` : "";
   return {
     url: f.url,
     title: `${name}: ${f.category}${detail}`,
@@ -258,7 +377,8 @@ export const exchangeFilings: Engine = {
   categories: ["filings", "news"],
   timeRangeSupport: true,
   // NSE (announcements + meetings) and the BSE feed (about 2.4MB) per company.
-  timeout: 8000,
+  // NSE + the BSE feed, plus reading up to ENRICH_LIMIT filing PDFs on a cold cache.
+  timeout: 12000,
   about: "NSE announcements and board meetings (by NSE ticker) and today's BSE announcements (by BSE code)",
   request() {
     return null; // not used: see search()
@@ -281,6 +401,8 @@ export const exchangeFilings: Engine = {
     const bseFeed = companies.some((c) => c.bse) ? settle(bseToday(ctx), new Map<string, BseItem[]>()) : undefined;
     const perCompany = await Promise.all(
       companies.map(async (c) => {
+        // Supplementary: failures here don't fail the engine.
+        const screenerPromise = screenerFilings(ctx, c).catch(() => [] as Filing[]);
         const [announcements, meetings] = await Promise.all([
           c.nse
             ? settle(
@@ -296,12 +418,19 @@ export const exchangeFilings: Engine = {
           ...mapNseAnnouncements(Array.isArray(announcements) ? announcements : [], c),
           ...mapUpcomingMeetings(Array.isArray(meetings) ? meetings : [], c, now),
         ];
-        const bse = c.bse && bseFeed ? mapBse((await bseFeed).get(c.bse) ?? [], c).filter((f) => f.time >= from) : [];
-        return [...nse, ...dropCrossListed(bse, nse)];
+        const screener = (await screenerPromise).filter((f) => f.time >= from);
+        const fromScreener = mergeSummaries(nse, screener);
+        const screenerDocs = new Set(screener.map((f) => bseDocId(f.url)).filter(Boolean));
+        const bse = (c.bse && bseFeed ? mapBse((await bseFeed).get(c.bse) ?? [], c) : [])
+          .filter((f) => f.time >= from && !screenerDocs.has(bseDocId(f.url)));
+        return [...nse, ...dropCrossListed([...fromScreener, ...bse], nse)];
       }),
     );
     const filings = perCompany.flat();
     if (!filings.length && errors.length) throw errors[0];
-    return rankFilings(filings, params.query).slice(0, MAX_RESULTS).map(toResult);
+    const ranked = rankFilings(filings, params.query).slice(0, MAX_RESULTS + ENRICH_LIMIT);
+    await enrichFromPdfs(ranked.slice(0, MAX_RESULTS + ENRICH_LIMIT));
+    // Re-rank: the subject line may now match the question ("dividend", "acquisition").
+    return rankFilings(ranked.filter((f) => !isEmptyFiling(f)), params.query).slice(0, MAX_RESULTS).map(toResult);
   },
 };

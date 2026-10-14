@@ -132,6 +132,14 @@ function formatPage(p: PageResult, maxChars: number): string {
   const head = [`Source: ${p.finalUrl ?? p.url}`, `Retrieved via: ${p.via}`];
   if (p.via === "wayback") head.push(`Archived copy from ${p.archivedAt ?? "unknown date"} (live page: ${p.liveError})`);
   if (p.paywalled) head.push(accessNote(p).trim());
+  if (p.pages && p.scannedPages) {
+    const all = p.scannedPages === p.pages;
+    head.push(
+      `[SCANNED PDF: ${p.scannedPages} of ${p.pages} pages are images with no extractable text${
+        all ? "" : "; only the other pages are below"
+      }. Tables and figures on scanned pages are missing; for results, the company's press release or investor presentation usually has them as text.]`,
+    );
+  }
   return `${head.join("\n")}\n\n${truncate(p.markdown ?? "", maxChars)}`;
 }
 

@@ -31,6 +31,9 @@ export interface PageResult {
   archiveUrl?: string;
   /** Wayback results: why the live page could not be used. */
   liveError?: string;
+  /** PDFs: page count, and how many pages are scanned images with no extractable text. */
+  pages?: number;
+  scannedPages?: number;
   error?: string;
 }
 
@@ -171,7 +174,50 @@ async function viaToMarkdown(url: string, res: Response, type: string, ai: Ai): 
   const name = new URL(res.url || url).pathname.split("/").pop() || "document";
   const out = await ai.toMarkdown({ name, blob }, NO_IMAGE_MODELS);
   if (out.format === "error") return { url, finalUrl: res.url, error: `conversion failed: ${out.error}` };
-  return { url, finalUrl: res.url, title: name, markdown: out.data.trim(), via: "convert" };
+  const markdown = stripDocumentMetadata(out.data.trim());
+  return { url, finalUrl: res.url, title: name, markdown, via: "convert", ...pdfPageStats(markdown) };
+}
+
+/**
+ * toMarkdown opens with a "## Metadata" list (author names, internal IDs, creator
+ * software) that only spends the reader's character budget; keep the contents.
+ */
+export function stripDocumentMetadata(markdown: string): string {
+  return markdown.replace(/^## Metadata\s*\n(?:- .*\n?)*/m, "").replace(/^## Contents\s*\n/m, "").trim();
+}
+
+/**
+ * toMarkdown marks PDF pages "### Page N"; a page with (almost) no text is a
+ * scanned image, which free conversion can't read. Exchange results filings are
+ * often scanned past the cover letter.
+ */
+export function pdfPageStats(markdown: string): { pages?: number; scannedPages?: number } {
+  const body = markdown.split(/^## Contents\s*$/m)[1] ?? markdown;
+  // (Also works after stripDocumentMetadata has removed the headers.)
+  const pages = body.split(/^### Page \d+\s*$/m).slice(1);
+  if (!pages.length) return {};
+  const scanned = pages.filter((p) => p.replace(/!\[[^\]]*\]\([^)]*\)|[#|\-\s]/g, "").length < 40).length;
+  return { pages: pages.length, scannedPages: scanned };
+}
+
+const DOCUMENT_TIMEOUT_MS = 6000;
+const MAX_FILING_PDF_BYTES = 10_000_000;
+
+/** A PDF's text as Markdown (free conversion, images off), or undefined. Used for filing snippets. */
+export async function pdfToMarkdown(url: string, ai: Ai): Promise<string | undefined> {
+  const res = await fetch(url, {
+    headers: { ...BROWSER_HEADERS, accept: "application/pdf,*/*;q=0.8" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(DOCUMENT_TIMEOUT_MS),
+  });
+  const size = Number(res.headers.get("content-length") ?? 0);
+  if (!res.ok || size > MAX_FILING_PDF_BYTES || !/pdf/i.test(res.headers.get("content-type") ?? "")) {
+    await res.body?.cancel();
+    return undefined;
+  }
+  const blob = new Blob([await res.arrayBuffer()], { type: "application/pdf" });
+  const out = await ai.toMarkdown({ name: "filing.pdf", blob }, NO_IMAGE_MODELS);
+  return out.format === "error" ? undefined : out.data;
 }
 
 async function viaBrowser(url: string, browser: BrowserSession): Promise<PageResult> {

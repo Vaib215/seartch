@@ -11,6 +11,7 @@ const STOPWORDS = new Set([
   "reported", "reports", "release", "released", "releases", "post", "posted", "posts", "say", "says", "said",
   "expect", "expected", "will", "would", "should", "can", "could", "show", "find", "get", "give", "list", "tell",
   "me", "us", "my", "our", "please", "yesterday", "tomorrow", "this", "week", "month", "year", "recent", "new",
+  "one", "two", "three", "five", "ten", "last", "past", "since", "over", "much", "many", "current", "currently",
 ]);
 
 // Reporting vocabulary. These never decide whether a story is about the subject.
@@ -26,6 +27,7 @@ const JARGON = new Set([
   "surged", "crash", "crashes", "crashed", "slump", "slumps", "plunge", "plunges", "rally", "rallies", "soar", "soars",
   "gain", "gains", "drop", "drops", "dropped", "decline", "declines", "up", "down", "high", "low", "outlook", "why",
   "trend", "forecast", "valuation", "upgrade", "downgrade", "brokerage", "brokerages", "analyst", "analysts",
+  "return", "returns", "performance", "level", "levels", "value", "close", "closing", "open", "opening", "today's",
 ]);
 
 // How publishers and exchange filings name each quarter.
@@ -92,6 +94,37 @@ export function mentionsSubject(text: string, terms: QueryTerms): boolean {
   const hay = normalizeText(text);
   const missing = terms.subject.filter((t) => !containsTerm(hay, t)).length;
   return missing === 0 || (terms.subject.length >= 3 && missing <= 1);
+}
+
+/**
+ * Index names (NIFTY 50, Bank Nifty, Sensex, India VIX...). Queries about an
+ * index are not about a company.
+ */
+export const INDEX_WORDS = /\b(nifty\s*\d*|bank\s*nifty|fin\s*nifty|sensex|bankex|india\s*vix|vix|midcap|smallcap|largecap)\b/i;
+
+/** Topic words: the subject words that don't name the company ("infosys deal wins" → deal, wins). */
+export function topicTerms(query: string, aliases: string[]): string[] {
+  const aliasWords = new Set(aliases.flatMap((a) => a.toLowerCase().split(/[^\p{L}\p{N}&]+/u)).filter(Boolean));
+  return splitQuery(query).subject.filter((w) => !aliasWords.has(w) && ![...aliasWords].some((a) => a.length > 4 && a.includes(w)));
+}
+
+/**
+ * With a resolved company, the text must name it: by an alias, or by every query
+ * word that belongs to the company name. Topic words alone ("deal wins") never
+ * make a story about the company.
+ */
+export function namesCompany(text: string, terms: QueryTerms, aliases: string[]): boolean {
+  const hay = normalizeText(text).replace(/[.'’]/g, "");
+  if (aliases.some((a) => containsTerm(hay, a.toLowerCase().replace(/[.'’]/g, "")))) return true;
+  const aliasWords = new Set(aliases.flatMap((a) => a.toLowerCase().split(/[^\p{L}\p{N}&]+/u)).filter(Boolean));
+  const nameWords = terms.subject.filter((w) => aliasWords.has(w));
+  return nameWords.length > 0 && nameWords.every((w) => containsTerm(hay, w));
+}
+
+/** How many of the given terms appear in the text. */
+export function termHits(text: string, terms: string[]): number {
+  const hay = normalizeText(text);
+  return terms.filter((t) => containsTerm(hay, t)).length;
 }
 
 /** How many jargon phrasings appear, for ranking. */

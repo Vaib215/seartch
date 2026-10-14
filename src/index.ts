@@ -1,5 +1,6 @@
 import { createMcpHandler } from "agents/mcp/server";
-import { RENDER_MODES, fetchPages, type PageResult } from "./fetch";
+import { RENDER_MODES, fetchPages, type PageResult, pdfToMarkdown } from "./fetch";
+import { configureDocumentText } from "./searx/filing_text";
 import { createServer } from "./mcp";
 import { ENGINES, ENGINE_BY_NAME } from "./searx/engines";
 import { EngineHealth } from "./searx/health";
@@ -32,6 +33,8 @@ export default {
   async fetch(req, env, ctx): Promise<Response> {
     const { pathname } = new URL(req.url);
     configureTickerSearch(tickerLookupFor(env));
+    const ai = env.AI;
+    configureDocumentText(ai ? (url) => pdfToMarkdown(url, ai) : undefined);
     try {
       if (req.method === "GET" && pathname === "/") {
         return json({ ok: true, endpoints: ["POST /search", "POST /fetch", "GET /engines", "POST /engines/test", "/mcp"] });

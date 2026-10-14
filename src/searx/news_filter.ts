@@ -1,8 +1,7 @@
 // Relevance and noise rules for news/filings searches, where a result is only
 // useful if it is an article (or filing) about the thing asked for.
 
-import { matchKey } from "./companies";
-import { type QueryTerms, containsTerm, mentionsSubject, normalizeText } from "./terms";
+import { type QueryTerms, mentionsSubject, namesCompany } from "./terms";
 
 /** Pages that are listings, quotes or social posts rather than articles. */
 const NON_ARTICLE_URL = [
@@ -48,10 +47,7 @@ export function isAbout(
   companies: CompanyLike[],
 ): boolean {
   const text = `${result.title} ${result.content ?? ""} ${urlWords(result.url)}`;
-  if (companies.length) {
-    const hay = matchKey(normalizeText(text));
-    if (companies.some((c) => c.aliases.some((a) => containsTerm(hay, matchKey(a))))) return true;
-  }
+  if (companies.length) return companies.some((c) => namesCompany(text, terms, c.aliases));
   return mentionsSubject(text, terms);
 }
 

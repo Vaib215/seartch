@@ -11,13 +11,15 @@ It needs no containers, no paid search APIs and no API keys for any engine, and 
 ## Features
 
 - **23 ported SearXNG engines**, plus engines for Indian financial news and stock research:
-  - **Exchange filings:** NSE corporate announcements and upcoming board meetings, and the same day's BSE announcements. This answers "did X publish results?" from the source.
+  - **Exchange filings:** NSE corporate announcements and upcoming board meetings, the same day's BSE announcements, and the latest BSE filings with one-line summaries from screener.in (which also covers BSE-only companies). Vague snippets like "General Updates" are replaced with the subject line read from the filing PDF, and filings with nothing to say are dropped. This answers "did X publish results?" from the source.
+  - **Index data:** level, day change, 1-week/1-month/1-year price returns, 52-week range, P/E, P/B and dividend yield for any NSE index (NIFTY 50, Bank Nifty, sector indices, India VIX), shown as a card above the news.
   - **Publishers:** site search for Economic Times, Financial Express and Business Standard; Yandex restricted to nine financial publishers; and 26 live publisher RSS feeds (ET, Mint, Business Standard, CNBC TV18, BusinessLine, NDTV Profit, Business Today).
-  - **Regulators:** RBI press releases and notifications, SEBI, and PIB.
+  - **Regulators:** RBI press releases and notifications, SEBI, and PIB. These run only when the query is about a regulator or regulation, and routine liquidity notices are skipped.
   - Google News (with link decoding) and Bing News, available by name.
 - **News mode** (`categories: ["news"]` or `["filings"]`):
   - **Company resolution:** maps the company a query names to every name it goes by (legal name, NSE ticker, BSE code, nicknames like RIL or HUL, the user's own wording). This needs an optional fuzzy ticker-search service; see [Company resolution](#company-resolution).
   - **Relevance:** drops stories that mention none of those names (no TCS stories in a Tata Elxsi search), listing, topic and quote pages, social posts, and gambling or crypto spam. Stories that only mention the company in passing rank lower.
+  - **Topics:** in "Infosys deal wins", "deal wins" is the topic. Stories must name the company, and those that also match the topic rank first.
   - **Matching:** subject words must match; reporting jargon only ranks. "Q2", "Q2FY27", "September quarter" and "period ended September 30" count as the same thing.
   - **Real publish dates:** read from article URLs (Mint, Hindustan Times, Business Standard, dated paths) or page metadata, never from search-engine crawl dates.
   - **Recency:** relevance decays with age, `sort: "date"` gives newest first, and `timeRange` accepts `quarter`.
@@ -27,7 +29,7 @@ It needs no containers, no paid search APIs and no API keys for any engine, and 
 - **Page fetch:**
   - Readability extraction, then Markdown conversion.
   - Charset detection (non-UTF-8 pages decode correctly).
-  - PDF and Office files converted with Workers AI `toMarkdown`, with image conversion disabled so it stays free.
+  - PDF and Office files converted with Workers AI `toMarkdown`, with image conversion disabled so it stays free. Scanned pages are counted and flagged; exchange results statements are often scanned past the cover letter.
   - Paywall detection from schema.org `isAccessibleForFree` plus barrier wording and teaser length.
   - Optional Wayback Machine fallback.
 - **Bearer-token auth**, compared in constant time.
@@ -43,6 +45,7 @@ What works depends heavily on **where requests come from**. Many engines block d
 | science | arxiv, semantic scholar, openalex | |
 | news | india finance news, india market feeds, economic times, financial express, business standard, exchange filings, regulators | google news (HTTP 503 to Workers), bing news (empty feed to Workers) |
 | filings | exchange filings, regulators | |
+| news + general | index data (cards for NSE indices) | |
 
 Results are best-effort. A site changing its HTML, or blocking an IP range, breaks or suspends that engine until its parser is updated.
 
