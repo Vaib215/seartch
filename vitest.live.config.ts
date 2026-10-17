@@ -1,5 +1,5 @@
 // Live engine check: runs real requests from this machine through the Workers runtime.
-//   LIVE_ENGINES=bing,brave LIVE_QUERY="rust async" npx vitest run -c vitest.live.config.ts
+//   LIVE_ENGINES=yandex,yep LIVE_QUERY="polycab results" npx vitest run -c vitest.live.config.ts
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
@@ -8,7 +8,7 @@ export default defineConfig({
   define: {
     __LIVE__: JSON.stringify({
       engines: process.env.LIVE_ENGINES ?? "",
-      query: process.env.LIVE_QUERY ?? "rust programming language",
+      query: process.env.LIVE_QUERY ?? "Tata Elxsi Q2 results",
       params: process.env.LIVE_PARAMS ?? "{}",
     }),
   },

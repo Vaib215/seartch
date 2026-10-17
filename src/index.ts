@@ -4,10 +4,11 @@ import { configureDocumentText } from "./searx/filing_text";
 import { createServer } from "./mcp";
 import { ENGINES, ENGINE_BY_NAME } from "./searx/engines";
 import { EngineHealth } from "./searx/health";
-import { configureTickerSearch, httpTickerLookup, resolveCompanies, tickerSearchConfigured, type TickerLookup } from "./searx/companies";
+import { configureTickerSearch, httpTickerBatch, httpTickerLookup, resolveCompanies, tickerSearchConfigured } from "./searx/companies";
 import { fetchPublishedDate } from "./searx/dates";
+import { configureTinyfish } from "./searx/tinyfish";
 import { CATEGORIES, SORT_ORDERS, type SearchRequest, type SearchResponse, metasearch, runEngine } from "./searx/search";
-import { type Category, type SafeSearch, type TimeRange, EngineError } from "./searx/types";
+import { type Category, type DocType, type SafeSearch, type TimeRange, DOC_TYPES, EngineError } from "./searx/types";
 import { HttpError, errorMessage, intInRange, json, mapLimit, oneOf, readJson, stringList } from "./util";
 
 export interface Env {
@@ -18,6 +19,10 @@ export interface Env {
   TICKER_SEARCH?: Fetcher;
   /** ...or its base URL. Either one enables company resolution and exchange filings. */
   TICKER_SEARCH_URL?: string;
+  /** Keys (comma-separated) for the TinyFish engines, by route: direct, through treg, through Monid. */
+  TINYFISH_API_KEYS?: string;
+  TREG_API_KEYS?: string;
+  MONID_API_KEYS?: string;
   /** Deployment version (version_metadata binding); keys caches so a deploy starts fresh. */
   CF_VERSION_METADATA?: { id: string };
 }
@@ -34,7 +39,9 @@ const QUERY_CONCURRENCY = 2;
 export default {
   async fetch(req, env, ctx): Promise<Response> {
     const { pathname } = new URL(req.url);
-    configureTickerSearch(tickerLookupFor(env));
+    const tickerCall = tickerCallFor(env);
+    configureTickerSearch(tickerCall && httpTickerLookup(tickerCall), tickerCall && httpTickerBatch(tickerCall));
+    configureTinyfish({ tinyfish: env.TINYFISH_API_KEYS, treg: env.TREG_API_KEYS, monid: env.MONID_API_KEYS });
     const ai = env.AI;
     configureDocumentText(ai ? (url) => pdfToMarkdown(url, ai) : undefined);
     try {
@@ -81,7 +88,7 @@ export default {
  *   "categories": ["news", "filings", "general"], "engines": ["nse filings"],
  *   "verifyDates": true, "includeContent": false, "render": "auto", "archiveFallback": false
  * }
- * Queries support SearXNG bangs: "!gh rust http", "!it tokio".
+ * Queries support SearXNG bangs: "!et polycab", "!filings tata elxsi".
  */
 async function handleSearch(body: Record<string, unknown>, env: Env) {
   const queries = stringList(body.queries ?? body.query, "queries", MAX_QUERIES);
@@ -125,6 +132,10 @@ function searchOptions(body: Record<string, unknown>): Omit<SearchRequest, "quer
     if (!ENGINE_BY_NAME.has(e)) throw new HttpError(400, `unknown engine "${e}"`);
   }
   const language = body.language === undefined ? "all" : stringList(body.language, "language", 1)[0];
+  const docTypes = body.docTypes === undefined ? undefined : stringList(body.docTypes, "docTypes", DOC_TYPES.length);
+  for (const d of docTypes ?? []) {
+    if (!(DOC_TYPES as string[]).includes(d)) throw new HttpError(400, `unknown docType "${d}" (one of ${DOC_TYPES.join(", ")})`);
+  }
   return {
     pageno: intInRange(body.pageno, "pageno", 1, 10, 1),
     language,
@@ -134,7 +145,9 @@ function searchOptions(body: Record<string, unknown>): Omit<SearchRequest, "quer
         ? undefined
         : (oneOf(body.timeRange, "timeRange", ["day", "week", "month", "quarter", "year"] as const, "day") as TimeRange),
     sort: oneOf(body.sort, "sort", SORT_ORDERS, "relevance"),
+    company: typeof body.company === "string" && body.company.trim() ? body.company.trim().slice(0, 100) : undefined,
     verifyDates: body.verifyDates !== false,
+    docTypes: docTypes as DocType[] | undefined,
     categories: categories as Category[] | undefined,
     engines,
   };
@@ -149,13 +162,20 @@ function withContent<T extends { url: string }>(hit: T, page: PageResult | undef
 
 /**
  * POST /fetch
- * { "urls": ["https://..."], "render": "auto" | "never" | "always", "archiveFallback": false }
+ * { "urls": ["https://..."], "render": "auto" | "never" | "always", "archiveFallback": false,
+ *   "pageStart": 1, "maxPages": 60, "maxChars": 60000, "focus": "working capital and net debt" }
+ * Long PDFs come back in parts: when `truncated`, call again with `pageStart: nextPage`.
+ * `focus` returns `passages` (with their PDF page) that best answer it instead of the whole text.
  */
 async function handleFetch(body: Record<string, unknown>, env: Env) {
   const urls = stringList(body.urls ?? body.url, "urls", MAX_FETCH_URLS);
   const render = oneOf(body.render, "render", RENDER_MODES, "auto");
   const archiveFallback = body.archiveFallback === true;
-  return { results: await fetchPages(urls, env, { render, archiveFallback }) };
+  const pageStart = intInRange(body.pageStart, "pageStart", 1, 100_000, 1);
+  const maxPages = body.maxPages == null ? undefined : intInRange(body.maxPages, "maxPages", 1, 10_000, 60);
+  const maxChars = body.maxChars == null ? undefined : intInRange(body.maxChars, "maxChars", 200, 500_000, 60_000);
+  const focus = typeof body.focus === "string" && body.focus.trim() ? body.focus.trim().slice(0, 500) : undefined;
+  return { results: await fetchPages(urls, env, { render, archiveFallback, pageStart, maxPages, maxChars, focus }) };
 }
 
 /** GET /engines: every engine with its categories and current suspension state here. */
@@ -186,7 +206,7 @@ async function listEngines(req: Request) {
  * Engines run sequentially so the 6-connection limit doesn't skew timings.
  */
 async function testEngines(body: Record<string, unknown>) {
-  const query = stringList(body.query ?? "rust programming language", "query", 1)[0];
+  const query = stringList(body.query ?? "Nifty 50 today", "query", 1)[0];
   const names = body.engines === undefined ? ENGINES.map((e) => e.name) : stringList(body.engines, "engines", 50);
   const out = [];
   for (const name of names) {
@@ -210,15 +230,15 @@ async function testEngines(body: Record<string, unknown>) {
 /** Engine suspension state, shared by every request this isolate serves. */
 const health = new EngineHealth();
 
-function tickerLookupFor(env: Env): TickerLookup | undefined {
+function tickerCallFor(env: Env): ((path: string, body: string) => Promise<Response>) | undefined {
   const post = (path: string, body: string) => ({ method: "POST", headers: { "content-type": "application/json" }, body });
   if (env.TICKER_SEARCH) {
     const binding = env.TICKER_SEARCH;
-    return httpTickerLookup((path, body) => binding.fetch(new Request(`https://ticker-search${path}`, post(path, body))));
+    return (path, body) => binding.fetch(new Request(`https://ticker-search${path}`, post(path, body)));
   }
   if (env.TICKER_SEARCH_URL) {
     const base = env.TICKER_SEARCH_URL.replace(/\/+$/, "");
-    return httpTickerLookup((path, body) => fetch(`${base}${path}`, { ...post(path, body), signal: AbortSignal.timeout(3000) }));
+    return (path, body) => fetch(`${base}${path}`, { ...post(path, body), signal: AbortSignal.timeout(3000) });
   }
   return undefined;
 }

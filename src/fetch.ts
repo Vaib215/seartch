@@ -1,7 +1,17 @@
 import puppeteer, { type Browser } from "@cloudflare/puppeteer";
 import { decodeBody } from "./decode";
+import {
+  STRUCT_TREE_MAX_BYTES,
+  TooLargeError,
+  convertDocument,
+  documentName,
+  readDocument,
+  reserveConversionMemory,
+} from "./doc_convert";
+import { type StoredDoc, clipAtBoundary, documentByteLimit, joinPages, loadDoc, pageWindow, saveDoc, splitPages } from "./doc_pages";
 import { htmlToMarkdown, wordCount } from "./extract";
 import type { Env } from "./index";
+import { focusPassages } from "./passages";
 import { detectPaywall } from "./paywall";
 import { BROWSER_HEADERS, errorMessage, mapLimit } from "./util";
 import { fetchArchived } from "./wayback";
@@ -13,7 +23,21 @@ export interface FetchOptions {
   render: RenderMode;
   /** Fall back to the latest Wayback Machine capture when the live page fails. */
   archiveFallback?: boolean;
+  /** PDFs: pages per part (default 60). */
+  maxPages?: number;
+  /** PDFs: first page to return, 1-based (default 1). Pass the previous part's nextPage. */
+  pageStart?: number;
+  /**
+   * Character budget for markdown. PDFs default to 60,000; with focus, 10,000
+   * of passages. Other pages are returned whole unless it is set.
+   */
+  maxChars?: number;
+  /** A question: return the passages that best answer it instead of the whole text (any page type). */
+  focus?: string;
 }
+
+/** The FetchOptions that shape a fetched page's text. */
+export type ShapeOptions = Pick<FetchOptions, "maxPages" | "pageStart" | "maxChars" | "focus">;
 
 export interface PageResult {
   url: string;
@@ -34,13 +58,27 @@ export interface PageResult {
   /** PDFs: page count, and how many pages are scanned images with no extractable text. */
   pages?: number;
   scannedPages?: number;
+  /** The document continues past what was returned (see nextPage), or was cut at maxChars. */
+  truncated?: boolean;
+  /** PDFs: the pageStart that returns the next part. */
+  nextPage?: number;
+  /** PDFs: first and last page returned (with focus: the pages searched). */
+  pageRange?: [number, number];
+  /** With focus: the passages that best answer it, best first. */
+  passages?: { page?: number; text: string; score: number }[];
   error?: string;
 }
 
 const FETCH_CONCURRENCY = 6;
 const FETCH_TIMEOUT_MS = 10_000;
+// Large filings download at 2.5-4.5 MB/s from NSE's archive.
+const DOCUMENT_DOWNLOAD_MS = 25_000;
+// How long a document waits for another conversion in this isolate to finish.
+const CONVERSION_QUEUE_MS = 45_000;
 const MAX_HTML_BYTES = 5_000_000;
-const MAX_DOCUMENT_BYTES = 20_000_000;
+const PDF_DEFAULT_MAX_CHARS = 60_000;
+const PDF_DEFAULT_MAX_PAGES = 60;
+const FOCUS_DEFAULT_MAX_CHARS = 10_000;
 const DOCUMENT_TYPES = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -62,19 +100,77 @@ export async function fetchPages(urls: string[], env: Env, opts: FetchOptions): 
   const { render } = opts;
   const browser = env.BROWSER && render !== "never" ? new BrowserSession(env.BROWSER) : undefined;
   let archiveBudget = opts.archiveFallback ? MAX_ARCHIVE_LOOKUPS : 0;
+  const fetchOne = async (url: string): Promise<PageResult> => {
+    // A document converted earlier (an earlier part, or a focus question) comes from the cache.
+    const stored = render !== "always" && /^https?:\/\//i.test(url) ? await loadDoc(url) : undefined;
+    if (stored) return storedResult(stored);
+    const live = await fetchPage(url, render, env.AI, browser);
+    if (!live.error || !isArchivable(live.error)) return live;
+    if (archiveBudget <= 0) {
+      return opts.archiveFallback ? { ...live, error: `${live.error}; archive: skipped (lookup limit reached)` } : live;
+    }
+    archiveBudget--;
+    return viaWayback(url, live.error);
+  };
   try {
-    return await mapLimit(urls, FETCH_CONCURRENCY, async (url) => {
-      const live = await fetchPage(url, render, env.AI, browser);
-      if (!live.error || !isArchivable(live.error)) return live;
-      if (archiveBudget <= 0) {
-        return opts.archiveFallback ? { ...live, error: `${live.error}; archive: skipped (lookup limit reached)` } : live;
-      }
-      archiveBudget--;
-      return viaWayback(url, live.error);
-    });
+    return await mapLimit(urls, FETCH_CONCURRENCY, async (url) => shapePage(await fetchOne(url), opts));
   } finally {
     await browser?.close();
   }
+}
+
+function storedResult(s: StoredDoc): PageResult {
+  return { url: s.url, finalUrl: s.finalUrl, title: s.title, markdown: joinPages(s.doc), via: "convert", pages: s.pages, scannedPages: s.scannedPages };
+}
+
+/**
+ * Cuts a fetched page down to what was asked for: a window of PDF pages, the
+ * passages that answer `focus`, or (for other pages, only when maxChars is set)
+ * the first maxChars characters.
+ */
+export function shapePage(page: PageResult, opts: ShapeOptions): PageResult {
+  if (page.error || page.markdown === undefined) return page;
+  const focus = opts.focus?.trim();
+  const doc = page.via === "convert" ? splitPages(page.markdown) : undefined;
+  if (doc?.pages.length) {
+    const start = Math.max(1, Math.floor(opts.pageStart ?? 1));
+    if (!focus) {
+      const w = pageWindow(doc, start, positive(opts.maxPages, PDF_DEFAULT_MAX_PAGES), positive(opts.maxChars, PDF_DEFAULT_MAX_CHARS));
+      if ("error" in w) return { ...page, markdown: undefined, error: w.error };
+      return { ...page, markdown: w.markdown, pageRange: w.pageRange, truncated: w.truncated, ...(w.nextPage === undefined ? {} : { nextPage: w.nextPage }) };
+    }
+    // Focus searches every page from pageStart unless maxPages narrows it.
+    const from = doc.pages.findIndex((p) => p.n >= start);
+    if (from < 0) return { ...page, markdown: undefined, error: `pageStart ${start} is past the last page (${doc.pages.at(-1)!.n})` };
+    const searched = doc.pages.slice(from, from + positive(opts.maxPages, doc.pages.length));
+    const found = focusPassages(searched.map((p) => ({ page: p.n, text: p.text })), focus, positive(opts.maxChars, FOCUS_DEFAULT_MAX_CHARS));
+    const last = searched.at(-1)!.n;
+    const next = doc.pages.find((p) => p.n > last)?.n;
+    return {
+      ...page,
+      markdown: found.passages.length ? found.markdown : noPassages(focus),
+      passages: found.passages,
+      pageRange: [searched[0].n, last],
+      truncated: next !== undefined,
+      ...(next === undefined ? {} : { nextPage: next }),
+    };
+  }
+  if (focus) {
+    const found = focusPassages([{ text: page.markdown }], focus, positive(opts.maxChars, FOCUS_DEFAULT_MAX_CHARS));
+    return { ...page, markdown: found.passages.length ? found.markdown : noPassages(focus), passages: found.passages };
+  }
+  if (opts.maxChars !== undefined && page.markdown.length > opts.maxChars) {
+    return { ...page, markdown: clipAtBoundary(page.markdown, positive(opts.maxChars, page.markdown.length)), truncated: true };
+  }
+  return page;
+}
+
+function positive(n: number | undefined, fallback: number): number {
+  return n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+}
+
+function noPassages(focus: string): string {
+  return `[No passage matches "${focus}". Fetch without focus to read the document, or ask in other words.]`;
 }
 
 /** Errors where an archived copy could help (not bad input or unsupported formats). */
@@ -121,61 +217,81 @@ async function fetchPage(url: string, render: RenderMode, ai?: Ai, browser?: Bro
 }
 
 async function viaFetch(url: string, ai?: Ai): Promise<PageResult> {
-  const res = await fetch(url, {
-    headers: BROWSER_HEADERS,
-    redirect: "follow",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    await res.body?.cancel();
-    const suffix = BROWSER_RETRY_STATUSES.has(res.status) ? BLOCKED_SUFFIX : "";
-    return { url, finalUrl: res.url, error: `HTTP ${res.status}${suffix}` };
-  }
-  const contentType = res.headers.get("content-type") ?? "";
-  const type = contentType.split(";")[0].trim().toLowerCase();
-  const isDocument = DOCUMENT_TYPES.has(type);
-  const maxBytes = isDocument ? MAX_DOCUMENT_BYTES : MAX_HTML_BYTES;
-  const size = Number(res.headers.get("content-length") ?? 0);
-  if (size > maxBytes) {
-    await res.body?.cancel();
-    return { url, error: `too large (${size} bytes)` };
-  }
-  if (isDocument) {
-    if (!ai) {
+  // One timer for headers and HTML bodies; documents get longer to download.
+  const abort = new AbortController();
+  let timer = setTimeout(() => abort.abort(new Error(`timed out after ${FETCH_TIMEOUT_MS / 1000}s`)), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: "follow", signal: abort.signal });
+    if (!res.ok) {
       await res.body?.cancel();
-      return { url, error: `unsupported content type: ${type} (AI binding not configured)` };
+      const suffix = BROWSER_RETRY_STATUSES.has(res.status) ? BLOCKED_SUFFIX : "";
+      return { url, finalUrl: res.url, error: `HTTP ${res.status}${suffix}` };
     }
-    return viaToMarkdown(url, res, type, ai);
+    const contentType = res.headers.get("content-type") ?? "";
+    const type = contentType.split(";")[0].trim().toLowerCase();
+    const isDocument = DOCUMENT_TYPES.has(type);
+    const maxBytes = isDocument ? documentByteLimit(res.url || url, type) : MAX_HTML_BYTES;
+    const size = Number(res.headers.get("content-length") ?? 0);
+    if (size > maxBytes) {
+      await res.body?.cancel();
+      return { url, error: `too large (${size} bytes; the limit is ${maxBytes} bytes)` };
+    }
+    if (isDocument) {
+      if (!ai) {
+        await res.body?.cancel();
+        return { url, error: `unsupported content type: ${type} (AI binding not configured)` };
+      }
+      clearTimeout(timer);
+      // The download clock starts when the document's turn to convert comes, not while it queues.
+      const startDownload = () => {
+        timer = setTimeout(() => abort.abort(new Error(`download timed out after ${DOCUMENT_DOWNLOAD_MS / 1000}s`)), DOCUMENT_DOWNLOAD_MS);
+      };
+      return await viaToMarkdown(url, res, type, ai, maxBytes, startDownload);
+    }
+    if (type === "text/markdown" || type === "text/plain") {
+      return { url, finalUrl: res.url, markdown: (await decodeBody(res, contentType)).trim(), via: "fetch" };
+    }
+    if (type && type !== "text/html" && type !== "application/xhtml+xml") {
+      await res.body?.cancel();
+      return { url, error: `unsupported content type: ${type}` };
+    }
+    const html = await decodeBody(res, contentType);
+    const { title, markdown } = htmlToMarkdown(html, res.url || url);
+    return { url, finalUrl: res.url, title, markdown, via: "fetch", ...detectPaywall(html, markdown) };
+  } finally {
+    clearTimeout(timer);
   }
-  if (type === "text/markdown" || type === "text/plain") {
-    return { url, finalUrl: res.url, markdown: (await decodeBody(res, contentType)).trim(), via: "fetch" };
-  }
-  if (type && type !== "text/html" && type !== "application/xhtml+xml") {
-    await res.body?.cancel();
-    return { url, error: `unsupported content type: ${type}` };
-  }
-  const html = await decodeBody(res, contentType);
-  const { title, markdown } = htmlToMarkdown(html, res.url || url);
-  return { url, finalUrl: res.url, title, markdown, via: "fetch", ...detectPaywall(html, markdown) };
 }
 
-// toMarkdown is free except where it runs AI models on images; turning off
-// embedded-image conversion keeps every conversion on the free path.
-const NO_IMAGE_MODELS: ConversionRequestOptions = {
-  conversionOptions: {
-    pdf: { images: { convert: false } },
-    docx: { images: { convert: false } },
-  },
-};
-
-/** PDFs and office documents go through Workers AI's converter (free for these formats). */
-async function viaToMarkdown(url: string, res: Response, type: string, ai: Ai): Promise<PageResult> {
-  const blob = new Blob([await res.arrayBuffer()], { type });
-  const name = new URL(res.url || url).pathname.split("/").pop() || "document";
-  const out = await ai.toMarkdown({ name, blob }, NO_IMAGE_MODELS);
-  if (out.format === "error") return { url, finalUrl: res.url, error: `conversion failed: ${out.error}` };
-  const markdown = stripDocumentMetadata(out.data.trim());
-  return { url, finalUrl: res.url, title: name, markdown, via: "convert", ...pdfPageStats(markdown) };
+/**
+ * PDFs and office documents go through Workers AI's converter (free for these
+ * formats); see doc_convert.ts. The converted, page-split text is cached so
+ * later parts and focus questions skip the download and conversion.
+ */
+async function viaToMarkdown(url: string, res: Response, type: string, ai: Ai, maxBytes: number, startDownload: () => void): Promise<PageResult> {
+  const size = Number(res.headers.get("content-length") ?? 0);
+  const release = await reserveConversionMemory(size || maxBytes, CONVERSION_QUEUE_MS);
+  if (!release) {
+    await res.body?.cancel();
+    return { url, error: "busy converting other large documents; try again shortly" };
+  }
+  startDownload();
+  try {
+    const hideStructTree = type === "application/pdf" && size > STRUCT_TREE_MAX_BYTES;
+    const bytes = await readDocument(res, type, maxBytes, hideStructTree);
+    const name = documentName(res.url || url, type);
+    const out = await convertDocument(ai, name, bytes);
+    if ("error" in out) return { url, finalUrl: res.url, error: `conversion failed: ${out.error}` };
+    const markdown = stripDocumentMetadata(out.markdown.trim());
+    const stats = pdfPageStats(markdown);
+    await saveDoc({ url, finalUrl: res.url, title: name, doc: splitPages(markdown), ...stats });
+    return { url, finalUrl: res.url, title: name, markdown, via: "convert", ...stats };
+  } catch (e) {
+    if (e instanceof TooLargeError) return { url, error: `too large (over ${maxBytes} bytes)` };
+    throw e;
+  } finally {
+    release();
+  }
 }
 
 /**
@@ -202,9 +318,16 @@ export function pdfPageStats(markdown: string): { pages?: number; scannedPages?:
 
 const DOCUMENT_TIMEOUT_MS = 6000;
 const MAX_FILING_PDF_BYTES = 10_000_000;
+// Filing subjects are best-effort; don't hold a search up behind a large conversion.
+const FILING_QUEUE_MS = 1500;
 
-/** A PDF's text as Markdown (free conversion, images off), or undefined. Used for filing snippets. */
+/**
+ * A PDF's text as Markdown (free conversion, images off, metadata stripped), or
+ * undefined. Used for filing snippets; shares the document cache with /fetch.
+ */
 export async function pdfToMarkdown(url: string, ai: Ai): Promise<string | undefined> {
+  const stored = await loadDoc(url);
+  if (stored) return joinPages(stored.doc);
   const res = await fetch(url, {
     headers: { ...BROWSER_HEADERS, accept: "application/pdf,*/*;q=0.8" },
     redirect: "follow",
@@ -215,9 +338,25 @@ export async function pdfToMarkdown(url: string, ai: Ai): Promise<string | undef
     await res.body?.cancel();
     return undefined;
   }
-  const blob = new Blob([await res.arrayBuffer()], { type: "application/pdf" });
-  const out = await ai.toMarkdown({ name: "filing.pdf", blob }, NO_IMAGE_MODELS);
-  return out.format === "error" ? undefined : out.data;
+  const release = await reserveConversionMemory(size || MAX_FILING_PDF_BYTES, FILING_QUEUE_MS);
+  if (!release) {
+    await res.body?.cancel();
+    return undefined;
+  }
+  try {
+    const type = "application/pdf";
+    const bytes = await readDocument(res, type, MAX_FILING_PDF_BYTES, size > STRUCT_TREE_MAX_BYTES);
+    const name = documentName(res.url || url, type);
+    const out = await convertDocument(ai, name, bytes);
+    if ("error" in out) return undefined;
+    const markdown = stripDocumentMetadata(out.markdown.trim());
+    await saveDoc({ url, finalUrl: res.url, title: name, doc: splitPages(markdown), ...pdfPageStats(markdown) });
+    return markdown;
+  } catch {
+    return undefined;
+  } finally {
+    release();
+  }
 }
 
 async function viaBrowser(url: string, browser: BrowserSession): Promise<PageResult> {

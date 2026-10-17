@@ -10,6 +10,7 @@ import { jargonHits, splitQuery, termHits, topicTerms } from "../terms";
 import {
   type Engine,
   type EngineContext,
+  type DocType,
   type EngineResult,
   type SearchParams,
   type TimeRange,
@@ -355,6 +356,35 @@ export function rankFilings(filings: Filing[], query: string): Filing[] {
   return [...filings].sort((a, b) => hits(b) - hits(a) || b.time - a.time);
 }
 
+// First match wins. Intimations come before results so "board meeting to
+// consider financial results" is an intimation, not the results themselves.
+const DOC_TYPE_RULES: [DocType, RegExp][] = [
+  ["transcript", /\btranscripts?\b/i],
+  ["presentation", /\b(?:investor|earnings|analyst|corporate|results?) presentation\b|\bpresentation\b|\bppt\b/i],
+  ["annual_report", /\bannual report\b|\bintegrated (?:annual )?report\b/i],
+  ["credit_rating", /\bcredit rating|\bratings? (?:reaffirm|upgrad|downgrad|assign|revis|withdr)|\b(?:crisil|icra|care ratings|india ratings|acuit[eé]|infomerics|brickwork)\b/i],
+  ["intimation", /\bintimation\b|\b(?:to|will|shall) be held\b|\bscheduled? (?:on|for)\b|\bschedule of\b|\bto consider\b/i],
+  ["results", /\bfinancial results?\b|\bresults? for the (?:quarter|period|half|year)\b|\b(?:un)?audited (?:standalone |consolidated )?(?:financial )?results\b|\bearnings release\b/i],
+  [
+    "order_win",
+    /\b(?:bagging|receiving|receipt) of (?:orders?|contracts?|loa)\b|\bletter of (?:award|acceptance|intent)\b|\b(?:work|purchase) orders?\b|\b(?:orders?|contracts?) (?:worth|valued|aggregating|of rs|received|secured|awarded)\b|\b(?:secures?|bags?|bagged|receives?|received|wins?|won) (?:an? |new |large |major |multiple )?(?:orders?|contracts?)\b/i,
+  ],
+];
+// "Transcript will be uploaded" announces a call; it isn't the transcript.
+const FUTURE_TRANSCRIPT = /transcripts?\b[^.]{0,60}\b(?:will|shall) be (?:uploaded|made available|available|placed|hosted)/i;
+
+/** What a filing is, from its category, summary and attachment file name. */
+export function classifyFiling(f: Pick<Filing, "category" | "text" | "url" | "meetingOn">): DocType {
+  if (f.meetingOn) return "intimation";
+  const file = decodeURIComponent(f.url.split(/[?#]/)[0].split("/").pop() ?? "").replace(/[_-]+/g, " ");
+  const text = `${f.category} ${f.text} ${/\.pdf$/i.test(file) ? file : ""}`;
+  for (const [type, re] of DOC_TYPE_RULES) {
+    if (type === "transcript" && FUTURE_TRANSCRIPT.test(text)) continue;
+    if (re.test(text)) return type;
+  }
+  return "other";
+}
+
 export function toResult(f: Filing): EngineResult {
   const name = shortName(f.company.name);
   const summary = f.text.replace(/\.$/, "");
@@ -368,6 +398,7 @@ export function toResult(f: Filing): EngineResult {
     content: f.text || undefined,
     publishedDate: new Date(f.time).toISOString(),
     author: f.source,
+    docType: classifyFiling(f),
   };
 }
 
@@ -426,11 +457,14 @@ export const exchangeFilings: Engine = {
         return [...nse, ...dropCrossListed([...fromScreener, ...bse], nse)];
       }),
     );
-    const filings = perCompany.flat();
+    let filings = perCompany.flat();
     if (!filings.length && errors.length) throw errors[0];
+    // Keep the wanted types, plus weak filings whose PDF may show they are one.
+    const wanted = params.docTypes?.length ? new Set(params.docTypes) : undefined;
+    if (wanted) filings = filings.filter((f) => wanted.has(classifyFiling(f)) || isWeakFiling(f));
     const ranked = rankFilings(filings, params.query).slice(0, MAX_RESULTS + ENRICH_LIMIT);
     await enrichFromPdfs(ranked.slice(0, MAX_RESULTS + ENRICH_LIMIT));
-    let kept = ranked.filter((f) => !isEmptyFiling(f));
+    let kept = ranked.filter((f) => !isEmptyFiling(f) && (!wanted || wanted.has(classifyFiling(f))));
     // A topic question ("Infosys deal wins") wants filings about that topic only.
     const topics = topicTerms(params.query, companies.flatMap((c) => c.aliases));
     if (topics.length) kept = kept.filter((f) => termHits(`${f.category} ${f.text}`, topics) > 0);

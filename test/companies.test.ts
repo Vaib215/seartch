@@ -100,6 +100,37 @@ describe("resolveCompanies", () => {
     expect(calls).toEqual(["tcs", "infosys"]);
   });
 
+  it("finds the company anywhere in a long query with one batch lookup", async () => {
+    const exact: Record<string, FuzzyMatch> = {
+      "genus power infrastructures": m("GENUSPOWER", "530343", "Genus Power Infrastructures Ltd.", "exact_name", 1, 8832),
+      "genus power": m("GENUSPOWER", "530343", "Genus Power Infrastructures Ltd.", "exact_ticker", 1, 8832),
+      polycab: m("POLYCAB", "542652", "Polycab India Ltd.", "exact_ticker", 1, 123865),
+      crisil: m("CRISIL", "500092", "Crisil Ltd.", "exact_ticker", 1, 33258),
+      "kpi green energy": m("KPIGREEN", "542323", "KPI Green Energy Ltd.", "exact_name", 1, 6321),
+      ntpc: m("NTPC", "532555", "NTPC Ltd.", "exact_ticker", 1, 305590),
+      idea: m("IDEA", "532822", "Vodafone Idea Ltd.", "exact_ticker", 1, 136403),
+      win: m("WINDMACHIN", "522029", "Windsor Machines Ltd.", "ticker_prefix", 0.99, 3016),
+    };
+    const batches: string[][] = [];
+    configureTickerSearch(
+      async () => [],
+      async (qs) => {
+        batches.push(qs);
+        return qs.map((q) => exact[q]);
+      },
+    );
+    const nse = async (q: string) => (await resolveCompanies(q)).map((c) => c.nse);
+    expect(await nse("Genus Power Infrastructures smart meter order book")).toEqual(["GENUSPOWER"]);
+    expect(batches[0]).toEqual(expect.arrayContaining(["genus power infrastructures", "smart meter", "book"]));
+    expect(await nse("what did management say about margins in Genus Power concall")).toEqual(["GENUSPOWER"]);
+    // The rating agency is the source, not the subject.
+    expect(await nse("latest CRISIL rating rationale for Polycab India")).toEqual(["POLYCAB"]);
+    // The longest exact name wins over a counterparty's ticker.
+    expect(await nse("KPI Green Energy order win from NTPC")).toEqual(["KPIGREEN"]);
+    // Ordinary words that happen to be tickers, and prefix matches, never count.
+    expect(await nse("investment idea smart meter stocks to win")).toEqual([]);
+  });
+
   it("survives a failing service", async () => {
     configureTickerSearch(async () => {
       throw new Error("down");

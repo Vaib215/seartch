@@ -3,64 +3,44 @@
 // this deployment's choice of what runs when a request names no engines.
 
 import type { Engine } from "../types";
-import { arxiv } from "./arxiv";
-import { bing } from "./bing";
-import { brave } from "./brave";
-import { crates } from "./crates";
-import { dockerHub } from "./docker_hub";
-import { duckduckgo } from "./duckduckgo";
+import { analysis } from "./analysis";
+import { creditRatings } from "./credit_ratings";
 import { exchangeFilings } from "./exchange_filings";
-import { github } from "./github";
-import { google } from "./google";
-import { googleNews } from "./google_news";
-import { hackernews } from "./hackernews";
 import { indexData } from "./index_data";
 import { bingNews, indiaFinanceNews, indiaMarketFeeds, regulators } from "./india_news";
 import { businessStandard, economicTimes, financialExpress } from "./india_publishers";
-import { marginalia } from "./marginalia";
-import { mojeek } from "./mojeek";
-import { mwmbl } from "./mwmbl";
-import { npm } from "./npm";
-import { openalex } from "./openalex";
-import { pypi } from "./pypi";
-import { qwant } from "./qwant";
-import { semanticScholar } from "./semantic_scholar";
-import { stackoverflow } from "./stackoverflow";
-import { startpage } from "./startpage";
-import { wikipedia } from "./wikipedia";
-import { yahoo } from "./yahoo";
+import { tinyfishNews, tinyfishWeb } from "./tinyfish";
+import { valuepickr } from "./valuepickr";
 import { yandex } from "./yandex";
 import { yep } from "./yep";
 
 const ALL: Engine[] = [
   // general web
-  duckduckgo, brave, bing, yahoo, yandex, google, qwant, startpage, mojeek, mwmbl, marginalia, yep, wikipedia,
-  // it / packages / q&a
-  github, stackoverflow, npm, crates, dockerHub, hackernews, pypi,
-  // science
-  arxiv, semanticScholar, openalex,
+  yandex, yep, tinyfishWeb,
   // news (Indian markets)
-  googleNews, bingNews, indiaFinanceNews, indiaMarketFeeds, economicTimes, financialExpress, businessStandard,
+  bingNews, indiaFinanceNews, indiaMarketFeeds, economicTimes, financialExpress, businessStandard, tinyfishNews,
   // official sources
   exchangeFilings, regulators, indexData,
+  // research: credit-rating rationales and business analysis
+  creditRatings, valuepickr, analysis,
 ];
 
 /**
- * Engines enabled by default here, overriding SearXNG's flag. Chosen from what
- * answers from Cloudflare's network (tested from the DEL colo, 2026-10-09):
- * DuckDuckGo and Yandex work there (Mwmbl too, but returns spam). Brave, Yahoo, Google, Qwant,
- * Startpage, Mojeek and Yep block Worker requests; Bing answers but with
- * off-topic results; StackOverflow's keyless API quota is exhausted on shared
- * Cloudflare IPs; Bing News returns an empty feed and Google News HTTP 503 to
- * Worker requests (both work from residential IPs, so they stay available by name). Everything else can
- * still be selected by name or `!bang`.
+ * Engines enabled by default here, overriding SearXNG's flag. Every engine
+ * listed answers from Cloudflare's network (tested from the DEL colo,
+ * 2026-10-17); engines that Cloudflare-hosted requests can't use were removed:
+ * DuckDuckGo, Startpage and PyPI (captcha), Google, Yahoo and Qwant (blocked),
+ * Brave (unparseable), Bing (off-topic results), Marginalia, Docker Hub and
+ * OpenAlex (rate limited), Mojeek (HTTP 403), Mwmbl (timeouts and spam), StackOverflow (keyless
+ * quota exhausted) and Google News (times out). Engines outside financial
+ * markets (code, packages, papers, Wikipedia) were removed too: seartch is
+ * for market news and company research only.
  */
 const DEFAULTS = new Set([
-  "duckduckgo", "yandex", "wikipedia",
-  "github", "npm", "crates.io", "docker hub", "hackernews",
-  "arxiv", "semantic scholar", "openalex",
-  "india finance news", "india market feeds", "economic times", "financial express", "business standard",
+  "yandex", "yep", "tinyfish", "tinyfish news",
+  "bing news", "india finance news", "india market feeds", "economic times", "financial express", "business standard",
   "exchange filings", "regulators", "index data",
+  "credit ratings", "valuepickr", "analysis",
 ]);
 
 export const ENGINES: Engine[] = ALL.map((e) => ({ ...e, disabled: !DEFAULTS.has(e.name) }));

@@ -29,6 +29,8 @@ describe("splitQuery", () => {
     expect(containsTerm("ril q2 profit", "ril")).toBe(true);
     expect(containsTerm("april auto sales", "ril")).toBe(false);
     expect(containsTerm("tataelxsi shares", "elxsi")).toBe(true);
+    expect(containsTerm("hcl infosystems shares", "infosys")).toBe(false);
+    expect(containsTerm("infosyss q2 deal wins", "infosys")).toBe(true);
   });
 
   it("lets long subjects miss one word", () => {

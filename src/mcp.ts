@@ -8,6 +8,7 @@ import type { PageResult } from "./fetch";
 import { ENGINES } from "./searx/engines";
 import type { MergedResult } from "./searx/results";
 import { CATEGORIES } from "./searx/search";
+import { DOC_TYPES } from "./searx/types";
 import { errorMessage } from "./util";
 
 export interface ToolBackends {
@@ -41,11 +42,13 @@ export function createServer(backends: ToolBackends): McpServer {
         "Metasearch across many engines (a SearXNG port), tuned for Indian financial news and stock research. " +
         "Up to 5 queries per call. " +
         "For news and company research, set categories ['news'] (Indian publishers: ET, Mint, Business Standard, " +
-        "Financial Express, CNBC TV18, BusinessLine and more; Google News; NSE filings; RBI/SEBI) and a timeRange; " +
-        "add 'filings' for exchange announcements and board-meeting outcomes only. News mode drops off-topic stories, " +
+        "Financial Express, CNBC TV18, BusinessLine and more; Bing News; NSE and BSE filings; RBI/SEBI) and a timeRange; " +
+        "add 'filings' for exchange announcements and board-meeting outcomes only (filter with docTypes, e.g. transcripts), " +
+        "'ratings' for credit-rating rationales (CRISIL, CARE, India Ratings, ICRA, Acuité, Infomerics), and 'analysis' " +
+        "for business analysis (ValuePickr threads, Value Research, Capitalmind, Finshots, BusinessLine). News mode drops off-topic stories, " +
         "listing/quote pages and spam, dates results from the article itself, and accepts sort 'date' for newest first. " +
         "Name the company plainly ('Tata Elxsi Q2 results', 'RIL dividend'); tickers and common names both work. " +
-        "Supports SearXNG bangs ('!gh tokio', '!science attention'). includeContent returns each page as Markdown.",
+        "Supports SearXNG bangs ('!et Polycab', '!filings Tata Elxsi'). includeContent returns each page as Markdown.",
       inputSchema: {
         queries: z.array(z.string().min(1)).min(1).max(5).describe("Search queries, run in parallel"),
         limit: z.number().int().min(1).max(30).optional().describe("Results per query (default 8)"),
@@ -55,6 +58,11 @@ export function createServer(backends: ToolBackends): McpServer {
           .optional()
           .describe("Specific engines; overrides categories"),
         timeRange: z.enum(["day", "week", "month", "quarter", "year"]).optional(),
+        docTypes: z
+          .array(z.enum(DOC_TYPES as [string, ...string[]]))
+          .optional()
+          .describe("Only filings/rating documents of these types (e.g. ['transcript','presentation']); news results are unaffected"),
+        company: z.string().max(100).optional().describe("The company the query is about, when known (name or ticker); resolves better than the query text"),
         sort: z.enum(["relevance", "date"]).optional().describe('"date": newest first (undated last). Default relevance'),
         language: z.string().optional().describe('"all" (default), "en", "en-US", ...'),
         includeContent: z.boolean().optional().describe("Fetch each result page as Markdown (slower)"),
@@ -74,7 +82,11 @@ export function createServer(backends: ToolBackends): McpServer {
       title: "Fetch pages as Markdown",
       description:
         "Fetch up to 20 URLs and return each page's main content as Markdown. " +
-        "Flags paywalled or partial articles. Optionally falls back to the Wayback Machine for blocked or dead pages.",
+        "Flags paywalled or partial articles. Optionally falls back to the Wayback Machine for blocked or dead pages. " +
+        "Long PDFs (annual reports, investor presentations, up to 37.5 MB) come back in parts of 60 pages: " +
+        "when the output says [More: ...], call again with that pageStart. " +
+        "Set focus to a question ('working capital days and net debt guidance') to get only the passages " +
+        "that answer it, with their page numbers, instead of the whole document.",
       inputSchema: {
         urls: z.array(z.string().url()).min(1).max(20),
         render: z
@@ -83,11 +95,15 @@ export function createServer(backends: ToolBackends): McpServer {
           .describe("Headless-browser fallback for JS-heavy or blocked pages (default auto)"),
         archiveFallback: z.boolean().optional().describe("Use the latest Wayback Machine capture when the live page fails"),
         maxChars: z.number().int().min(200).max(200_000).optional().describe("Per-page Markdown cap (default 20000)"),
+        pageStart: z.number().int().min(1).optional().describe("PDFs: first page to return (default 1); pass the previous part's next page"),
+        maxPages: z.number().int().min(1).max(500).optional().describe("PDFs: pages per part (default 60)"),
+        focus: z.string().min(3).max(500).optional().describe("Return only the passages that answer this question, with page numbers"),
       },
     },
     async ({ maxChars, ...args }) =>
       run(async () => {
-        const out = await backends.fetch(args);
+        // The backend cuts at maxChars too, so nextPage starts right after what is shown.
+        const out = await backends.fetch({ ...args, maxChars: maxChars ?? DEFAULT_FETCH_CHARS });
         return out.results.map((p) => formatPage(p, maxChars ?? DEFAULT_FETCH_CHARS)).join("\n\n---\n\n");
       }),
   );
@@ -112,7 +128,9 @@ function formatSearch(r: SearchOut, maxChars: number): string {
   if (!r.results.length) lines.push("No results.");
   r.results.forEach((h, i) => {
     lines.push(`${i + 1}. [${h.title}](${h.url})`);
-    const meta = [h.author, h.publishedDate?.slice(0, 10), `via ${h.engines.join(", ")}`].filter(Boolean).join(" · ");
+    const meta = [h.author, h.publishedDate?.slice(0, 10), h.docType?.replace("_", " "), `via ${h.engines.join(", ")}`]
+      .filter(Boolean)
+      .join(" · ");
     lines.push(`   ${meta}`);
     if (h.content) lines.push(`   ${h.content}`);
     if (h.markdown) {
@@ -136,6 +154,12 @@ function formatPage(p: PageResult, maxChars: number): string {
   const head = [`Source: ${p.finalUrl ?? p.url}`, `Retrieved via: ${p.via}`];
   if (p.via === "wayback") head.push(`Archived copy from ${p.archivedAt ?? "unknown date"} (live page: ${p.liveError})`);
   if (p.paywalled) head.push(accessNote(p).trim());
+  if (p.pageRange) {
+    const [from, to] = p.pageRange;
+    head.push(`${p.passages ? "Searched pages" : "Pages"} ${from}–${to}${p.pages ? ` of ${p.pages}` : ""}`);
+  }
+  if (p.passages) head.push(p.passages.length ? `${p.passages.length} passages match the focus, best first` : "No passage matched the focus");
+  if (p.truncated && p.nextPage) head.push(`[More: call again with pageStart: ${p.nextPage}]`);
   if (p.pages && p.scannedPages) {
     const all = p.scannedPages === p.pages;
     head.push(

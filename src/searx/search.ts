@@ -6,7 +6,7 @@ import type { EngineState, Outcome } from "./health";
 import { outcomeFromError } from "./health";
 import { raiseForHttpError, send } from "./http";
 import type { Company } from "./companies";
-import { type CompanyLike, isAbout, isNonArticle, isSpam } from "./news_filter";
+import { type CompanyLike, isAbout, isJunkPage, isNonArticle, isSpam } from "./news_filter";
 import { type MergedResult, ResultContainer } from "./results";
 import { splitQuery, termHits, topicTerms } from "./terms";
 import {
@@ -19,7 +19,7 @@ import {
   EngineError,
 } from "./types";
 
-export const CATEGORIES: Category[] = ["general", "it", "science", "news", "filings", "packages", "repos", "q&a"];
+export const CATEGORIES: Category[] = ["general", "news", "filings", "ratings", "analysis"];
 
 const DEFAULT_TIMEOUT_MS = 3000;
 const CACHE_TTL_SECONDS = 1800;
@@ -35,6 +35,8 @@ const TIME_RANGE_MS: Record<TimeRange, number> = {
 // Publishers and engines disagree by hours on "today"; don't cut exactly at the edge.
 const RANGE_SLACK_MS = DAY_MS;
 const PASSING_MENTION_WEIGHT = 0.4;
+// Reserve engines run when fewer results than this are about the query's company.
+const FALLBACK_BELOW = 5;
 // "Infosys deal wins": stories about Infosys but not about deals rank below those
 // that are, and are dropped altogether once enough on-topic stories exist.
 const TOPIC_MISS_WEIGHT = 0.35;
@@ -52,6 +54,8 @@ export interface SearchRequest extends SearchParams {
   categories?: Category[];
   /** "date": newest first (undated results last). Default "relevance". */
   sort?: SortOrder;
+  /** The company the query is about, when the caller knows it; resolved instead of the query text. */
+  company?: string;
   /** News mode: read page metadata to date the top undated results. Default true. */
   verifyDates?: boolean;
 }
@@ -100,8 +104,8 @@ export interface SearchDeps {
 const memo: EngineContext["memo"] = new Map();
 
 /**
- * SearXNG's bang syntax (searx/query.py, simplified): `!gh foo` selects the
- * engine with shortcut/name "gh"; `!it foo` selects a category.
+ * SearXNG's bang syntax (searx/query.py, simplified): `!et foo` selects the
+ * engine with shortcut/name "et"; `!filings foo` selects a category.
  */
 export function parseBangs(query: string): { query: string; engines: string[]; categories: Category[] } {
   const engines: string[] = [];
@@ -109,12 +113,24 @@ export function parseBangs(query: string): { query: string; engines: string[]; c
   const rest: string[] = [];
   for (const word of query.split(/\s+/).filter(Boolean)) {
     const bang = word.startsWith("!") && word.length > 1 ? word.slice(1).toLowerCase().replace(/_/g, " ") : undefined;
-    const engine = bang ? (ENGINE_BY_SHORTCUT.get(bang) ?? ENGINE_BY_NAME.get(bang)) : undefined;
-    if (engine) engines.push(engine.name);
-    else if (bang && (CATEGORIES as string[]).includes(bang)) categories.push(bang as Category);
+    // A category name wins over an engine of the same name: `!analysis` is the whole category.
+    const category = bang && (CATEGORIES as string[]).includes(bang) ? (bang as Category) : undefined;
+    const engine = bang && !category ? (ENGINE_BY_SHORTCUT.get(bang) ?? ENGINE_BY_NAME.get(bang)) : undefined;
+    if (category) categories.push(category);
+    else if (engine) engines.push(engine.name);
     else rest.push(word);
   }
   return { query: rest.join(" "), engines, categories };
+}
+
+/** Companies for the request: the caller's `company` if given (resolved, else taken as a name), else the query's. */
+async function resolveFor(company: string | undefined, query: string, deps: SearchDeps): Promise<Company[]> {
+  if (!deps.resolveCompanies) {
+    return company ? [{ name: company, aliases: [company.toLowerCase()] }] : [];
+  }
+  const found = await deps.resolveCompanies(company ?? query).catch(() => [] as Company[]);
+  if (!found.length && company) return [{ name: company, aliases: [company.toLowerCase()] }];
+  return found;
 }
 
 export function selectEngines(req: { engines?: string[]; categories?: Category[] }): Engine[] {
@@ -136,9 +152,8 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
   const newsMode =
     (categories ?? []).some((c) => c === "news" || c === "filings") ||
     (engines.length > 0 && engines.every((e) => e.categories.some((c) => c === "news" || c === "filings")));
-  // Resolve companies while the engines run.
-  const companiesPromise =
-    newsMode && deps.resolveCompanies ? deps.resolveCompanies(params.query).catch(() => []) : Promise.resolve([]);
+  // Resolve companies while the engines run (every mode: general web is filtered by company too).
+  const companiesPromise = resolveFor(req.company, params.query, deps);
 
   const container = new ResultContainer(new Map(engines.map((e) => [e.name, e.weight ?? 1])));
   const unresponsive: UnresponsiveEngine[] = [];
@@ -146,7 +161,7 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
   const outcomes: Outcome[] = [];
   const now = Date.now();
 
-  const runnable = engines.filter((engine) => {
+  const usable = engines.filter((engine) => {
     const state = deps.health[engine.name];
     if (state && state.suspendedUntil > now) {
       unresponsive.push({ engine: engine.name, error: state.reason, suspended: true });
@@ -158,8 +173,9 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
     return true;
   });
 
-  await Promise.all(
-    runnable.map(async (engine) => {
+  const runEngines = (list: Engine[]) =>
+    Promise.all(
+    list.map(async (engine) => {
       const started = Date.now();
       try {
         const { results, cached, skipped } = await runEngine(engine, params, deps.cache, deps.cacheVersion);
@@ -175,6 +191,16 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
       }
     }),
   );
+
+  await runEngines(usable.filter((e) => !e.fallback));
+  // Second phase: reserve engines run only when the first pass found too little about the company.
+  const reserve = usable.filter((e) => e.fallback);
+  if (reserve.length) {
+    const companies = await companiesPromise;
+    const terms = splitQuery(params.query);
+    const relevant = container.ordered().filter((r) => isAbout(r, terms, companies)).length;
+    if (relevant < FALLBACK_BELOW) await runEngines(reserve);
+  }
 
   if (outcomes.length) deps.recordOutcomes(outcomes);
 
@@ -195,19 +221,56 @@ export async function metasearch(req: SearchRequest, deps: SearchDeps): Promise<
       const matched = results.filter((r) => termHits(`${r.title} ${r.content ?? ""} ${r.url.replace(/[-_/.]+/g, " ")}`, topics) > 0).length;
       response.topic = { terms: topics, matched };
     }
-    if (companies.length) {
-      response.companies = companies.map((c) => {
-        const ids = [c.nse && `NSE: ${c.nse}`, c.bse && `BSE: ${c.bse}`].filter(Boolean).join(", ");
-        return ids ? `${c.name} (${ids})` : c.name;
-      });
-    }
+    if (companies.length) response.companies = describeCompanies(companies);
   } else {
-    results = withinTimeRange(results, params.timeRange);
+    // General web: when the query names a company, keep only pages about it, without
+    // login, app, portal or dictionary pages, and date what the engines left undated.
+    const companies = await companiesPromise;
+    if (companies.length) {
+      const dropped = { nonArticle: 0, spam: 0, offTopic: 0, outOfRange: 0 };
+      results = refineGeneral(results, params.query, companies, dropped);
+      if (req.verifyDates !== false && deps.publishedDate) await verifyDates(results, deps.publishedDate);
+      const before = results.length;
+      results = withinTimeRange(results, params.timeRange);
+      dropped.outOfRange = before - results.length;
+      response.dropped = dropped;
+      response.companies = describeCompanies(companies);
+    } else {
+      results = withinTimeRange(results, params.timeRange);
+    }
+  }
+  if (req.docTypes?.length) {
+    const wanted = new Set(req.docTypes);
+    results = results.filter((r) => !r.docType || wanted.has(r.docType));
   }
   results = req.sort === "date" ? sortByDate(results) : results;
   // Data cards (index levels and returns) answer the question; keep them on top.
   response.results = [...results.filter(isDataCard), ...results.filter((r) => !isDataCard(r))];
   return response;
+}
+
+function describeCompanies(companies: Company[]): string[] {
+  return companies.map((c) => {
+    const ids = [c.nse && `NSE: ${c.nse}`, c.bse && `BSE: ${c.bse}`].filter(Boolean).join(", ");
+    return ids ? `${c.name} (${ids})` : c.name;
+  });
+}
+
+/** General-web results for a company query: about the company, and not junk pages. */
+export function refineGeneral(
+  results: MergedResult[],
+  query: string,
+  companies: CompanyLike[],
+  dropped: { nonArticle: number; spam: number; offTopic: number },
+): MergedResult[] {
+  const terms = splitQuery(query);
+  return results.filter((r) => {
+    if (isDataCard(r)) return true;
+    if (isJunkPage(r.url)) return dropped.nonArticle++, false;
+    if (isSpam(r.title, r.content, query)) return dropped.spam++, false;
+    if (!isAbout(r, terms, companies)) return dropped.offTopic++, false;
+    return true;
+  });
 }
 
 function isDataCard(r: MergedResult): boolean {
@@ -232,7 +295,7 @@ export function refineNews(
   return results.filter((r) => {
     // Index cards were picked by the index engine's own name matching.
     if (isDataCard(r)) return true;
-    if (isNonArticle(r.url)) return dropped.nonArticle++, false;
+    if (isNonArticle(r.url) || isJunkPage(r.url)) return dropped.nonArticle++, false;
     if (isSpam(r.title, r.content, query)) return dropped.spam++, false;
     if (!isAbout(r, terms, companies)) return dropped.offTopic++, false;
     // Named only in the snippet ("...rivals such as Hero MotoCorp..."): keep, but below
@@ -317,6 +380,7 @@ export async function runEngine(
   const signal = AbortSignal.timeout(engine.timeout ?? DEFAULT_TIMEOUT_MS);
   const ctx: EngineContext = {
     fetch: (input, init) => fetch(input, { ...init, signal }),
+    signal,
     memo,
   };
   let results: EngineResult[];
@@ -351,6 +415,7 @@ function engineCacheKey(engine: Engine, p: SearchParams, version: string): strin
   u.searchParams.set("l", p.language);
   u.searchParams.set("s", String(p.safesearch));
   if (p.timeRange) u.searchParams.set("t", p.timeRange);
+  if (p.docTypes?.length) u.searchParams.set("d", [...p.docTypes].sort().join(","));
   return u.href;
 }
 

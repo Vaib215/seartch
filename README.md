@@ -1,21 +1,21 @@
 # seartch
 
-A self-hosted search API that runs on a single Cloudflare Worker:
+A self-hosted search API for Indian financial markets (market news, company research, exchange filings) that runs on a single Cloudflare Worker:
 
 - **`/search`**: metasearch, a TypeScript port of [SearXNG](https://github.com/searxng/searxng)'s core. It queries many engines in parallel, merges duplicates and ranks results with SearXNG's scoring.
 - **`/fetch`**: fetches pages and returns their main content as clean Markdown, flagging paywalled or teaser articles. It can optionally fall back to the Wayback Machine for blocked or dead pages.
 - **`/mcp`**: the same two capabilities as MCP tools (`web_search`, `web_fetch`), so Claude Code, Cursor, Zed and other MCP clients can use it directly.
 
-It needs no containers, no paid search APIs and no API keys for any engine, and it runs on the Workers Paid plan ($5/month).
+It needs no containers and no paid search APIs, and it runs on the Workers Paid plan ($5/month). Only the optional TinyFish engines need a key, and TinyFish search is free.
 
 ## Features
 
-- **23 ported SearXNG engines**, plus engines for Indian financial news and stock research:
+- **Financial markets only:** Yandex and Yep web search (ported from SearXNG), TinyFish web and news search, and engines for Indian financial news and stock research:
   - **Exchange filings:** NSE corporate announcements and upcoming board meetings, the same day's BSE announcements, and the latest BSE filings with one-line summaries from screener.in (which also covers BSE-only companies). Vague snippets like "General Updates" are replaced with the subject line read from the filing PDF, and filings with nothing to say are dropped. This answers "did X publish results?" from the source.
   - **Index data:** level, day change, 1-week/1-month/1-year price returns, 52-week range, P/E, P/B and dividend yield for any NSE index (NIFTY 50, Bank Nifty, sector indices, India VIX), shown as a card above the news.
   - **Publishers:** site search for Economic Times, Financial Express and Business Standard; Yandex restricted to nine financial publishers; and 26 live publisher RSS feeds (ET, Mint, Business Standard, CNBC TV18, BusinessLine, NDTV Profit, Business Today).
   - **Regulators:** RBI press releases and notifications, SEBI, and PIB. These run only when the query is about a regulator or regulation, and routine liquidity notices are skipped.
-  - Google News (with link decoding) and Bing News, available by name.
+  - **Bing News**, and **TinyFish** news search over Indian financial publishers when the other news engines find too little (see [TinyFish](#tinyfish)).
 - **News mode** (`categories: ["news"]` or `["filings"]`):
   - **Company resolution:** maps the company a query names to every name it goes by (legal name, NSE ticker, BSE code, nicknames like RIL or HUL, the user's own wording). This needs an optional fuzzy ticker-search service; see [Company resolution](#company-resolution).
   - **Relevance:** drops stories that mention none of those names (no TCS stories in a Tata Elxsi search), listing, topic and quote pages, social posts, and gambling or crypto spam. Stories that only mention the company in passing rank lower.
@@ -23,7 +23,7 @@ It needs no containers, no paid search APIs and no API keys for any engine, and 
   - **Matching:** subject words must match; reporting jargon only ranks. "Q2", "Q2FY27", "September quarter" and "period ended September 30" count as the same thing.
   - **Real publish dates:** read from article URLs (Mint, Hindustan Times, Business Standard, dated paths) or page metadata, never from search-engine crawl dates.
   - **Recency:** relevance decays with age, `sort: "date"` gives newest first, and `timeRange` accepts `quarter`.
-- **SearXNG behaviour:** URL normalisation and duplicate merging, `weight × hits / position` scoring, `!bang` shortcuts (`!gh tokio`, `!science attention`), categories, time ranges and paging.
+- **SearXNG behaviour:** URL normalisation and duplicate merging, `weight × hits / position` scoring, `!bang` shortcuts (`!et polycab`, `!filings tata elxsi`), categories, time ranges and paging.
 - **Engine suspension with backoff:** an engine that serves a captcha, a 403 or a 429 is switched off for a while instead of being hit again. State is kept in memory per isolate, as in SearXNG.
 - **Per-engine result caching** through the Cache API.
 - **Page fetch:**
@@ -36,16 +36,16 @@ It needs no containers, no paid search APIs and no API keys for any engine, and 
 
 ## Engines
 
-What works depends heavily on **where requests come from**. Many engines block data-center IPs, including Cloudflare's. The defaults in [`src/searx/engines/index.ts`](src/searx/engines/index.ts) are the engines that answered from a Cloudflare Worker in testing. Every engine can still be selected by name or `!bang`.
+What works depends heavily on **where requests come from**. Many engines block data-center IPs, including Cloudflare's. Only engines that answered from a Cloudflare Worker in testing (October 2026) are included. Each one can also be selected by name or `!bang`.
 
-| Category | On by default | Off by default (blocked from Workers or low quality) |
-|---|---|---|
-| general | duckduckgo, yandex, wikipedia | brave, bing, yahoo, google, qwant, startpage, mojeek, mwmbl, marginalia, yep |
-| it / packages / q&a | github, npm, crates.io, docker hub, hackernews | stackoverflow (keyless quota), pypi (JS challenge) |
-| science | arxiv, semantic scholar, openalex | |
-| news | india finance news, india market feeds, economic times, financial express, business standard, exchange filings, regulators | google news (HTTP 503 to Workers), bing news (empty feed to Workers) |
-| filings | exchange filings, regulators | |
-| news + general | index data (cards for NSE indices) | |
+| Category | Engines |
+|---|---|
+| general | yandex, yep, tinyfish |
+| news | bing news, india finance news, india market feeds, economic times, financial express, business standard, tinyfish news (fallback), exchange filings, regulators |
+| filings | exchange filings, regulators |
+| news + general | index data (cards for NSE indices) |
+
+Removed because they don't work from Workers: DuckDuckGo, Startpage and PyPI (captcha), Google, Yahoo and Qwant (blocked), Brave (unparseable), Bing (off-topic results), Marginalia, Docker Hub and OpenAlex (rate limited), Mojeek (HTTP 403), Mwmbl (timeouts and spam), StackOverflow (keyless quota exhausted) and Google News (times out). Engines outside financial markets (code, packages, papers, Wikipedia) were removed as well.
 
 Results are best-effort. A site changing its HTML, or blocking an IP range, breaks or suspends that engine until its parser is updated.
 
@@ -59,7 +59,7 @@ npx wrangler dev                      # http://localhost:8787
 
 ```bash
 curl -X POST localhost:8787/search -H "Authorization: Bearer change-me" \
-  -d '{"queries":["rust async runtime"],"limit":5}'
+  -d '{"queries":["tata elxsi q2 results"],"categories":["news"],"limit":5}'
 ```
 
 ## Deploy
@@ -85,7 +85,25 @@ Point seartch at it with either:
 
 Keep deployment-specific bindings out of the public config. For example, copy `wrangler.jsonc` to the gitignored `wrangler.private.jsonc`, add `"services": [{ "binding": "TICKER_SEARCH", "service": "<your-worker>" }]`, and deploy with `npx wrangler deploy -c wrangler.private.jsonc`.
 
+If the service also answers `POST /api/stock/fuzzy/batch {"queries": [...]}` with `{"data": [{"query", "match"}]}`, long queries are matched in one call: every word span is looked up, so "what did management say about margins in Genus Power concall" resolves to Genus Power.
+
 Without the service, nothing is resolved. News relevance then falls back to the query's subject words, and exchange filings return nothing.
+
+### TinyFish
+
+The `tinyfish` (general) and `tinyfish news` engines use [TinyFish](https://tinyfish.ai) search, which is free per call. They need at least one key, through any of three routes. Each secret is a comma-separated list:
+
+| Secret | Route | Typical latency | Limit per key |
+|---|---|---|---|
+| `TINYFISH_API_KEYS` | direct (`api.search.tinyfish.ai`) | ~1 s | 30/min |
+| `TREG_API_KEYS` | [treg](https://treg.to) gateway, capped at $0 per call | ~1.5 s | 500/min |
+| `MONID_API_KEYS` | [Monid](https://monid.ai) | ~4 s | |
+
+All keys form one pool. A search uses the fastest route with room and spills to the others under load or on a 429. A search still waiting after 2.5 s is also sent to the next key, and the first answer wins. Without keys, both engines return nothing.
+
+```bash
+npx wrangler secret put TINYFISH_API_KEYS
+```
 
 ### Bindings and cost
 
@@ -99,10 +117,10 @@ All endpoints except `GET /` need `Authorization: Bearer <AUTH_TOKEN>`.
 
 ```json
 {
-  "queries": ["tata elxsi q2 results", "!gh htmlrewriter"],
+  "queries": ["tata elxsi q2 results", "!et polycab capex"],
   "limit": 10,
   "categories": ["news", "general"],
-  "engines": ["duckduckgo"],
+  "engines": ["yandex"],
   "timeRange": "week",
   "sort": "relevance",
   "verifyDates": true,
@@ -154,7 +172,7 @@ For news, have the client pass `categories: ["news"]` and a `timeRange`.
 ```bash
 npm test                 # unit + fixture tests in the Workers runtime (vitest + @cloudflare/vitest-plugin)
 npm run typecheck
-LIVE_ENGINES="duckduckgo,github" LIVE_QUERY="tokio" npx vitest run -c vitest.live.config.ts   # live engine check
+LIVE_ENGINES="yandex,yep" LIVE_QUERY="polycab results" npx vitest run -c vitest.live.config.ts   # live engine check
 ```
 
 Each engine lives in `src/searx/engines/<name>.ts` and implements `request(params)` and `response(resp)`. Engines that don't map to a single HTTP request implement `search(params, ctx)` instead. Tests run each engine's parser against a saved response in `test/fixtures/`. The article pages used by the paywall tests are synthetic.

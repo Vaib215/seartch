@@ -38,7 +38,7 @@ const POLICY: Record<EngineErrorKind, [number, number]> = {
 export function suspensionSeconds(kind: EngineErrorKind, continuousErrors: number, override?: number): number {
   const [base, cap] = POLICY[kind];
   // Engine-specified times (e.g. 15 days for a Cloudflare CAPTCHA) still get capped.
-  // An override of 0 (DuckDuckGo, Qwant) suits one server retrying a short block;
+  // An override of 0 suits one server retrying a short block;
   // a fleet of Workers would just keep hammering, so it falls back to the base.
   const start = override || base;
   return Math.min(start * 2 ** Math.max(0, continuousErrors - 1), Math.max(cap, base));

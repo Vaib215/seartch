@@ -1,2 +1,6 @@
 # Copy to .dev.vars for `wrangler dev` / tests. Never commit .dev.vars.
 AUTH_TOKEN=change-me
+# Optional, comma-separated: keys for the TinyFish engines (see README, TinyFish).
+# TINYFISH_API_KEYS=
+# TREG_API_KEYS=
+# MONID_API_KEYS=

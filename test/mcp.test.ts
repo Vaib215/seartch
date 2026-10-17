@@ -8,7 +8,7 @@ const backends: ToolBackends = {
       {
         query: (body.queries as string[])[0],
         results: [{ url: "https://a.com/", title: "A", content: "snippet", engines: ["x", "y"], positions: [1, 1], score: 4 }],
-        unresponsiveEngines: [{ engine: "brave", error: "captcha", suspended: true }],
+        unresponsiveEngines: [{ engine: "yep", error: "captcha", suspended: true }],
       },
     ],
   }),
@@ -53,7 +53,7 @@ describe("MCP server", () => {
     const text = r.result.content[0].text;
     expect(text).toContain('## Results for "q"');
     expect(text).toContain("1. [A](https://a.com/)");
-    expect(text).toContain("brave (suspended)");
+    expect(text).toContain("yep (suspended)");
   });
 
   it("marks paywalled teasers and errors in fetch output", async () => {

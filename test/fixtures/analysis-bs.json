@@ -1,0 +1,37 @@
+{
+ "success": true,
+ "statusCode": 200,
+ "data": {
+  "news": [
+   {
+    "heading1": "Q1 results: ABREL, Godrej, JSW Cement, FirstCry, and 693 more on Aug 13",
+    "sub_heading": "Q1FY27 company results: Firms including Jubilant Foodworks, Brigade Enterprises, CESC, DCM Shriram Industries, and Dev Information Technology are also to release their April-June earnings today",
+    "article_url": "/companies/quarterly-results/q1-results-abrel-godrej-jsw-cement-firstcry-and-693-more-on-aug-13-126081300386_1.html",
+    "article_type": "article",
+    "published_date": 1786593862
+   },
+   {
+    "heading1": "Genus Power tanks 12% on huge volumes; 65 million shares change hands",
+    "sub_heading": "A combined 65 million equity shares representing 21 per cent of total equity of Genus Power changed hands on the NSE (35.64 million) and BSE (29.24 million) till 10:22 AM on Tuesday, shows data.",
+    "article_url": "/markets/news/genus-power-share-price-tanks-12-on-huge-volumes-65-million-shares-change-hands-126063000302_1.html",
+    "article_type": "article",
+    "published_date": 1782798472
+   },
+   {
+    "heading1": "Genus Power eyes large chunk of \u20b960K crore smart electric meter tenders",
+    "sub_heading": "Backed by GIC, Genus Power expects strong growth from India's smart metering drive and plans to install 2.4 crore meters over the next two to three years",
+    "article_url": "/companies/news/genus-power-eyes-rs-60000-cr-smart-meter-tenders-amid-rdss-driven-growth-126061900879_1.html",
+    "article_type": "article",
+    "published_date": 1781868578
+   },
+   {
+    "heading1": "Q4 results: Vodafone Idea, Delhivery, KEC, Latent View among 56 on May 16",
+    "sub_heading": "Q4FY26 company results: Firms including UNO Minda, Genus Power Infrastructures, Neogen Chemicals, Tatva Chintan Pharma Chem, and Rolex Rings are also to release their January-March earnings today",
+    "article_url": "/companies/quarterly-results/q4-results-vodafone-idea-delhivery-kec-latent-view-among-56-on-may-16-126051600094_1.html",
+    "article_type": "article",
+    "published_date": 1778901939
+   }
+  ]
+ },
+ "message": "Search listed successfully."
+}

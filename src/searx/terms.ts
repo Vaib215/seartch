@@ -77,11 +77,12 @@ function escape(s: string): string {
 
 /**
  * Whether one term or phrase occurs in already-lowercased text. Short terms
- * must be whole words ("ril" must not hit "april"); longer ones may sit inside
- * a word, so "elxsi" still hits the ticker "tataelxsi".
+ * must be whole words ("ril" must not hit "april"). Longer ones may end a word,
+ * so "elxsi" still hits the ticker "tataelxsi", but must not run into more
+ * letters beyond a possessive "s": "infosys" must not hit "hcl infosystems".
  */
 export function containsTerm(hay: string, term: string): boolean {
-  if (term.length > 4) return hay.includes(term);
+  if (term.length > 4) return new RegExp(`${escape(term)}s?($|[^\\p{L}\\p{N}])`, "u").test(hay);
   return new RegExp(`(^|[^\\p{L}\\p{N}])${escape(term)}($|[^\\p{L}\\p{N}])`, "u").test(hay);
 }
 

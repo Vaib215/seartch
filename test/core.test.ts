@@ -41,8 +41,10 @@ describe("ResultContainer (searx/results.py)", () => {
 
 describe("bangs", () => {
   it("extracts engine and category bangs", () => {
-    expect(parseBangs("!gh tokio runtime")).toEqual({ query: "tokio runtime", engines: ["github"], categories: [] });
-    expect(parseBangs("!it rust")).toEqual({ query: "rust", engines: [], categories: ["it"] });
+    expect(parseBangs("!et polycab results")).toEqual({ query: "polycab results", engines: ["economic times"], categories: [] });
+    expect(parseBangs("!filings tata elxsi")).toEqual({ query: "tata elxsi", engines: [], categories: ["filings"] });
+    expect(parseBangs("!analysis genus power")).toEqual({ query: "genus power", engines: [], categories: ["analysis"] });
+    expect(parseBangs("!an genus power")).toEqual({ query: "genus power", engines: ["analysis"], categories: [] });
     expect(parseBangs("hello !nope")).toEqual({ query: "hello !nope", engines: [], categories: [] });
   });
 });

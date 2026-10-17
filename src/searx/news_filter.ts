@@ -23,6 +23,24 @@ const NON_ARTICLE_URL = [
 // Gambling/crypto spam and SEO pages that ride on finance queries.
 const SPAM_WORDS = /\b(casino|betting|bet app|satta|matka|aviator|rummy|teen patti|sports? bet|crypto (signals?|pump)|airdrop|forex signals?|escort|loan app download)\b/i;
 
+// Pages that never answer a research question: logins, apps, AI chat and portal
+// pages, and generic dictionary entries (general search returns these for long
+// finance queries, e.g. "... order book cash flow working capital receivables").
+const JUNK_PAGE = [
+  /^https?:\/\/([^/]+\.)?(claude\.ai|chatgpt\.com|chat\.openai\.com|perplexity\.ai|gemini\.google\.com|copilot\.microsoft\.com|poe\.com)\b/i,
+  /^https?:\/\/([^/]+\.)?(office365\.com|office\.com|outlook\.(com|live\.com)|live\.com|login\.microsoftonline\.com|accounts\.google\.com|flow\.google\.com|replit\.com|cloud\.comfy\.org|notion\.so|slack\.com|zoom\.us)\b/i,
+  /^https?:\/\/([^/]+\.)?(mytax\.hasil\.gov\.my|incometax\.gov\.in|eportal\.incometax\.gov\.in|gst\.gov\.in|irs\.gov)\b/i,
+  /\/(login|signin|sign-in|signup|sign-up|register|auth|oauth|sso)(\/|\?|$)/i,
+  /investopedia\.com\/(terms|ask)\//i,
+  /(dictionary|thesaurus|merriam-webster|vocabulary)\.(com|cambridge\.org)/i,
+  /dictionary\.cambridge\.org/i,
+  /\.wikipedia\.org\/wiki\/(Cash_flow|Working_capital|Accounts_receivable|Order_book)/i,
+];
+
+export function isJunkPage(url: string): boolean {
+  return JUNK_PAGE.some((re) => re.test(url));
+}
+
 export function isNonArticle(url: string): boolean {
   return NON_ARTICLE_URL.some((re) => re.test(url));
 }

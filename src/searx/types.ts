@@ -2,10 +2,25 @@
 // to Cloudflare Workers. An engine builds one HTTP request for a query and
 // parses the response into results; the orchestrator does everything else.
 
-export type Category = "general" | "it" | "science" | "news" | "filings" | "packages" | "repos" | "q&a";
+export type Category = "general" | "news" | "filings" | "ratings" | "analysis";
 
 export type SafeSearch = 0 | 1 | 2;
 export type TimeRange = "day" | "week" | "month" | "quarter" | "year";
+
+/** What a filing or document is, for filtering with `docTypes`. */
+export type DocType =
+  | "transcript"
+  | "presentation"
+  | "results"
+  | "annual_report"
+  | "credit_rating"
+  | "order_win"
+  | "intimation"
+  | "other";
+
+export const DOC_TYPES: DocType[] = [
+  "transcript", "presentation", "results", "annual_report", "credit_rating", "order_win", "intimation", "other",
+];
 
 export interface SearchParams {
   query: string;
@@ -15,6 +30,8 @@ export interface SearchParams {
   language: string;
   safesearch: SafeSearch;
   timeRange?: TimeRange;
+  /** Only filings and documents of these types; results without a docType (news) are unaffected. */
+  docTypes?: DocType[];
 }
 
 export interface EngineRequest {
@@ -46,11 +63,15 @@ export interface EngineResult {
   publishedDate?: string;
   thumbnail?: string;
   author?: string;
+  /** Filings and rating rationales: what the document is. */
+  docType?: DocType;
 }
 
 /** Utilities an engine may use while building its request (token pre-fetches, etc.). */
 export interface EngineContext {
   fetch(input: string | URL, init?: RequestInit): Promise<Response>;
+  /** The engine's abort signal (its timeout), for engines that call fetch helpers themselves. */
+  signal?: AbortSignal;
   /** Small per-isolate memo for tokens like Startpage's `sc` code. */
   memo: Map<string, { value: string; expires: number }>;
 }
@@ -75,6 +96,11 @@ export interface Engine {
   about?: string;
   /** Highest page the engine serves (SearXNG's max_page). */
   maxPage?: number;
+  /**
+   * Runs only as a second phase, when the first pass found too few results about
+   * the query's company (a slower or rate-limited source kept in reserve).
+   */
+  fallback?: boolean;
   /**
    * Engines that don't map to one HTTP request (e.g. several RSS feeds) implement
    * this instead; request/response are then unused. Mirrors SearXNG's offline engines.
